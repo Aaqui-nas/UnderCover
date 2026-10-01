@@ -1,6 +1,5 @@
-// Change la version à chaque mise à jour pour forcer le rafraîchissement du cache.
-const CACHE = 'undercover-v1';
-const FILES = ['./', 'index.html', 'style.css', 'app.js', 'words.js', 'manifest.json',
+const CACHE = 'undercover-dev'; // remplacé automatiquement par la CI à chaque déploiement
+const FILES = ['./', 'index.html', 'style.css', 'app.js', 'words.js', 'firebase-config.js', 'cloud.js', 'manifest.json',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
@@ -14,8 +13,12 @@ self.addEventListener('activate', (e) => {
 });
 
 // Réseau d'abord (pour récupérer les mises à jour), cache si hors-ligne.
+// Seuls les fichiers de l'appli et le SDK Firebase sont mis en cache ;
+// les requêtes Firestore/Auth passent directement au réseau.
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
+  const url = new URL(e.request.url);
+  if (url.origin !== self.location.origin && url.hostname !== 'www.gstatic.com') return;
   e.respondWith(
     fetch(e.request)
       .then((res) => { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); return res; })

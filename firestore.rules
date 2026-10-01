@@ -1,0 +1,25 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /pairs/{pairId} {
+      // Tout le monde peut lire les paires partagées.
+      allow read: if true;
+
+      // Ajout : utilisateur connecté (anonyme), deux mots de 1 à 40 caractères,
+      // aucun autre champ, auteur = soi-même, date = heure du serveur.
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly(['a', 'b', 'by', 'createdAt'])
+        && request.resource.data.a is string
+        && request.resource.data.a.size() > 0 && request.resource.data.a.size() <= 40
+        && request.resource.data.b is string
+        && request.resource.data.b.size() > 0 && request.resource.data.b.size() <= 40
+        && request.resource.data.by == request.auth.uid
+        && request.resource.data.createdAt == request.time;
+
+      // Suppression : seulement par la personne qui a ajouté la paire.
+      allow delete: if request.auth != null && resource.data.by == request.auth.uid;
+
+      allow update: if false;
+    }
+  }
+}

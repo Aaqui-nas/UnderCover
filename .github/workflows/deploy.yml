@@ -1,0 +1,55 @@
+name: Déploiement
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Vérifier la syntaxe JavaScript
+        run: for f in app.js cloud.js words.js firebase-config.js sw.js; do node --check "$f"; done
+
+      - name: Vérifier les mots
+        run: node scripts/check-words.js
+
+      - name: Préparer le site
+        run: |
+          mkdir _site
+          cp -r index.html style.css app.js cloud.js words.js firebase-config.js sw.js manifest.json icons _site/
+          # Nouvelle version de cache à chaque déploiement : les téléphones récupèrent la mise à jour.
+          sed -i "s/const CACHE = 'undercover-[^']*'/const CACHE = 'undercover-${GITHUB_SHA::8}'/" _site/sw.js
+          grep -q "undercover-${GITHUB_SHA::8}" _site/sw.js
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

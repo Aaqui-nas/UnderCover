@@ -2,6 +2,8 @@ const STORAGE_KEY = 'undercover-v1';
 const POINTS = { civil: 2, under: 10, white: 6 };
 const ROLE_LABEL = { civil: 'Civil', under: 'Undercover', white: 'Mr. White' };
 const CUSTOM_CAT = 'Mots perso';
+const SHARED_CAT = 'Mots partagés';
+const SHARED_KEY = 'undercover-shared';
 
 const app = document.getElementById('app');
 
@@ -18,6 +20,26 @@ let state = load() || {
 };
 let ui = { overlay: null, peek: null };
 
+// Paires partagées via Firebase (cloud.js). Copie locale pour jouer hors-ligne
+// même si le SDK Firebase ne se charge pas.
+let sharedPairs = [];
+try { sharedPairs = JSON.parse(localStorage.getItem(SHARED_KEY)) || []; } catch {}
+let cloudStatus = 'off'; // off | connecting | online | offline | error
+
+window.onSharedPairs = (pairs) => {
+  sharedPairs = pairs;
+  try { localStorage.setItem(SHARED_KEY, JSON.stringify(pairs)); } catch {}
+  if (pairs.length && !state.sharedCatInit) {
+    state.sharedCatInit = true;
+    if (!state.categories.includes(SHARED_CAT)) state.categories.push(SHARED_CAT);
+  }
+  if (['home', 'custom'].includes(state.screen)) render();
+};
+window.onCloudStatus = (status) => {
+  cloudStatus = status;
+  if (state.screen === 'custom') render();
+};
+
 function load() {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY)); } catch { return null; }
 }
@@ -32,6 +54,7 @@ const normalize = (s) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase(
 
 function allCategories() {
   const cats = { ...WORD_CATEGORIES };
+  if (sharedPairs.length) cats[SHARED_CAT] = sharedPairs.map((p) => [p.a, p.b]);
   if (state.customPairs.length) cats[CUSTOM_CAT] = state.customPairs;
   return cats;
 }
@@ -150,7 +173,15 @@ function afterReveal() {
 
 function render() {
   const screens = { home, custom, scores, deal, game, whiteGuess, reveal, end };
+  // Conserve la saisie en cours si la liste partagée se met à jour pendant qu'on tape.
+  const typed = [...app.querySelectorAll('input[name]')].map((i) => [i.closest('form')?.dataset.form, i.name, i.value]);
+  const focused = document.activeElement?.name;
   app.innerHTML = (screens[state.screen] || home)() + overlay();
+  for (const [form, name, value] of typed) {
+    const el = app.querySelector(`[data-form="${form}"] [name="${name}"]`);
+    if (el && value) el.value = value;
+  }
+  if (focused) app.querySelector(`input[name="${focused}"]`)?.focus();
   save();
   const input = app.querySelector('[autofocus]');
   if (input && !('ontouchstart' in window)) input.focus();
@@ -208,7 +239,7 @@ function home() {
     </div>
 
     <div class="row">
-      <button class="grow" data-action="go" data-screen="custom">✏️ Mots perso</button>
+      <button class="grow" data-action="go" data-screen="custom">✏️ Ajouter des mots</button>
       <button class="grow" data-action="go" data-screen="scores">🏆 Scores</button>
     </div>
 
@@ -229,23 +260,56 @@ function stepper(label, cls, key, val) {
     </div>`;
 }
 
+const CLOUD_LABEL = {
+  off: 'Partage non configuré : les mots restent sur ce téléphone.',
+  connecting: 'Connexion…',
+  online: '☁️ Connecté : les mots ajoutés sont visibles par tout le monde.',
+  offline: '📴 Hors-ligne : tes ajouts seront envoyés au retour du réseau.',
+  error: '⚠️ Impossible de joindre le serveur de mots partagés.',
+};
+const cloudReady = () => !!window.cloud && cloudStatus !== 'error';
+
 function custom() {
+  const shared = cloudReady();
+  const mine = sharedPairs.filter((p) => p.mine);
+  const others = sharedPairs.length - mine.length;
   return `
     <div class="row"><button class="ghost" data-action="go" data-screen="home">← Retour</button></div>
-    <h2>Mots perso</h2>
-    <p class="muted">Ajoute tes propres paires (blagues entre potes, etc.). Elles apparaissent dans la catégorie « ${CUSTOM_CAT} ».</p>
+    <h2>Ajouter des mots</h2>
+    <p class="muted">${!window.cloud && cloudStatus === 'offline'
+      ? '📴 Hors-ligne : tes ajouts restent sur ce téléphone, tu pourras les partager plus tard.'
+      : CLOUD_LABEL[cloudStatus]}</p>
     <form class="card" data-form="addPair">
       <input type="text" name="a" placeholder="Mot 1 (ex : Pizza)" maxlength="40" autocomplete="off">
       <input type="text" name="b" placeholder="Mot 2 proche (ex : Quiche)" maxlength="40" autocomplete="off">
-      <button class="primary" type="submit">Ajouter la paire</button>
+      <button class="primary" type="submit">${shared ? 'Ajouter pour tout le monde' : 'Ajouter sur ce téléphone'}</button>
     </form>
-    <div class="list">
-      ${state.customPairs.map((p, i) => `
-        <div class="item"><span>${esc(p[0])} / ${esc(p[1])}</span>
-          <button class="ghost small" data-action="removePair" data-i="${i}">✕</button></div>`).join('')
-        || '<p class="muted center">Aucune paire perso pour l\'instant.</p>'}
-    </div>
+    ${sharedPairs.length || shared ? `
+      <h2>${SHARED_CAT} (${sharedPairs.length})</h2>
+      <p class="muted">${others ? `${others} ajoutée${others > 1 ? 's' : ''} par les autres. ` : ''}Tu peux supprimer uniquement celles que tu as ajoutées.</p>
+      <div class="list">
+        ${mine.map((p) => `
+          <div class="item"><span>${esc(p.a)} / ${esc(p.b)}${p.pending ? ' <span class="muted">· envoi…</span>' : ''}</span>
+            <button class="ghost small" data-action="removeShared" data-id="${esc(p.id)}">✕</button></div>`).join('')
+          || '<p class="muted center">Tu n\'as encore rien ajouté.</p>'}
+      </div>` : ''}
+    ${state.customPairs.length ? `
+      <h2>Sur ce téléphone uniquement (${state.customPairs.length})</h2>
+      <div class="list">
+        ${state.customPairs.map((p, i) => `
+          <div class="item"><span>${esc(p[0])} / ${esc(p[1])}</span>
+            <span class="row">
+              ${shared ? `<button class="ghost small" data-action="sharePair" data-i="${i}">☁️ Partager</button>` : ''}
+              <button class="ghost small" data-action="removePair" data-i="${i}">✕</button>
+            </span></div>`).join('')}
+      </div>` : ''}
   `;
+}
+
+function pairExists(a, b) {
+  const key = (x, y) => [normalize(x), normalize(y)].sort().join('|');
+  const k = key(a, b);
+  return Object.values(allCategories()).some((pairs) => pairs.some((p) => key(p[0], p[1]) === k));
 }
 
 function scores() {
@@ -442,6 +506,15 @@ const actions = {
     state.categories = state.categories.length === all.length ? [] : all;
   },
   removePair: (d) => { state.customPairs.splice(+d.i, 1); },
+  removeShared: (d) => {
+    const p = sharedPairs.find((x) => x.id === d.id);
+    if (p) confirm(`Supprimer « ${p.a} / ${p.b} » pour tout le monde ?`, () => window.cloud.remove(p.id));
+  },
+  sharePair: (d) => {
+    const [a, b] = state.customPairs[+d.i];
+    window.cloud.add(a, b);
+    state.customPairs.splice(+d.i, 1);
+  },
   resetScores: () => confirm('Remettre tous les scores à zéro ?', () => { state.scores = {}; }),
   start: () => { if (canStart()) startGame(); },
   showWord: (d) => { state.game.dealIndex = +d.i; },
@@ -470,8 +543,15 @@ const forms = {
   addPair: (f) => {
     const a = f.elements.a.value.trim(), b = f.elements.b.value.trim();
     if (!a || !b) return false;
-    state.customPairs.push([a, b]);
-    if (!state.categories.includes(CUSTOM_CAT)) state.categories.push(CUSTOM_CAT);
+    if (normalize(a) === normalize(b)) { alert('Les deux mots doivent être différents.'); return false; }
+    if (pairExists(a, b)) { alert('Cette paire existe déjà.'); return false; }
+    f.reset(); // avant l'envoi : la mise à jour de la liste re-rend l'écran
+    if (cloudReady()) {
+      window.cloud.add(a, b);
+    } else {
+      state.customPairs.push([a, b]);
+      if (!state.categories.includes(CUSTOM_CAT)) state.categories.push(CUSTOM_CAT);
+    }
   },
   whiteGuess: (f) => {
     const guess = f.elements.guess.value.trim();
