@@ -761,10 +761,8 @@ function profile() {
       <div class="id-info">
         <span class="label">Fiche agent</span>
         <h2 class="display">${esc(a.name)}</h2>
-        <label class="link photo-btn">Prendre une photo
-          <input type="file" accept="image/*" capture="user" data-photo="${esc(a.id)}" hidden></label>
-        <label class="link photo-btn">Choisir dans la galerie
-          <input type="file" accept="image/*" data-photo="${esc(a.id)}" hidden></label>
+        <button class="link" data-action="takePhoto" data-id="${esc(a.id)}">Prendre une photo</button>
+        <button class="link" data-action="choosePhoto" data-id="${esc(a.id)}">Choisir dans la galerie</button>
         ${a.photo ? `<button class="link red" data-action="removePhoto" data-id="${esc(a.id)}">Retirer la photo</button>` : ''}
       </div>
     </div>
@@ -794,6 +792,27 @@ function profile() {
 }
 
 // Photo : recadrée en carré et réduite pour tenir dans le stockage du téléphone.
+// Champ fichier placé hors de #app : quand l'appareil photo s'ouvre, l'appli passe en
+// arrière-plan et se redessine au retour ; un champ dans #app serait détruit avant de
+// recevoir la photo.
+const photoInput = document.createElement('input');
+photoInput.type = 'file';
+photoInput.accept = 'image/*';
+photoInput.hidden = true;
+document.body.appendChild(photoInput);
+let photoTarget = null;
+photoInput.addEventListener('change', () => {
+  const file = photoInput.files?.[0];
+  if (file && photoTarget) setPhoto(photoTarget, file);
+  photoInput.value = '';
+});
+
+function pickPhoto(id, camera) {
+  photoTarget = id;
+  if (camera) photoInput.setAttribute('capture', 'user'); else photoInput.removeAttribute('capture');
+  photoInput.click();
+}
+
 function setPhoto(id, file) {
   const url = URL.createObjectURL(file);
   const img = new Image();
@@ -1072,6 +1091,8 @@ const actions = {
   }),
   openProfile: (d) => { ui.profile = d.id || ensureAgent(d.name).id; state.screen = 'profile'; },
   addKnown: (d) => { if (!state.players.some((p) => nameKey(p) === nameKey(d.name))) state.players.push(d.name); },
+  takePhoto: (d) => pickPhoto(d.id, true),
+  choosePhoto: (d) => pickPhoto(d.id, false),
   removePhoto: (d) => agentOp({ type: 'set', id: d.id, data: { photo: null } }),
   resetStats: (d) => confirm(`Effacer les stats et les points de ${agentById(d.id)?.name} pour tout le monde ?`, () => {
     agentOp({ type: 'set', id: d.id, data: Object.fromEntries(STAT_FIELDS.map((f) => [f, 0])) });
@@ -1190,10 +1211,6 @@ app.addEventListener('input', (e) => {
 });
 
 app.addEventListener('change', (e) => {
-  if (e.target.dataset.photo && e.target.files?.[0]) {
-    setPhoto(e.target.dataset.photo, e.target.files[0]);
-    return;
-  }
   if (e.target.name === 'cat') {
     syncNewCat();
     if (e.target.value === NEW_CAT) app.querySelector('input[name="newCat"]').focus();

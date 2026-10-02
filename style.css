@@ -555,7 +555,6 @@ input[type=search]::-webkit-search-cancel-button { -webkit-appearance: none; }
 }
 .id-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
 .id-info h2 { font-size: 40px; word-break: break-word; margin-bottom: 6px; }
-.photo-btn { cursor: pointer; }
 
 .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); border: 2px solid var(--ink); }
 .stat-grid > div { padding: 12px 4px 10px; display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center; }
