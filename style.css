@@ -85,7 +85,18 @@ input[type=text] {
   -webkit-user-select: text;
   user-select: text;
 }
-input[type=text]:focus { outline: none; border-color: var(--accent); }
+input[type=text]:focus, select:focus { outline: none; border-color: var(--accent); }
+select {
+  font: inherit;
+  width: 100%;
+  padding: 14px;
+  border-radius: 12px;
+  border: 2px solid var(--surface-2);
+  background: var(--bg);
+  color: var(--text);
+}
+label { font-size: 14px; margin-bottom: -6px; }
+[hidden] { display: none !important; }
 
 .players { display: flex; flex-direction: column; gap: 8px; }
 .player {

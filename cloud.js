@@ -1,10 +1,17 @@
-// Synchronisation des paires de mots partagées avec Firestore.
-// Expose window.cloud = { add, remove } et prévient app.js via
-// window.onSharedPairs(pairs) et window.onCloudStatus(status).
+// Synchronisation des paires de mots avec Firestore.
+// Expose window.cloud = { uid, add, remove } et prévient app.js via
+// window.onPairs(pairs) (liste complète confirmée par le serveur) et
+// window.onCloudStatus(status).
 const SDK = 'https://www.gstatic.com/firebasejs/10.12.2';
 const MAX_LEN = 40;
+const MAX_CAT_LEN = 30;
 
-const setStatus = (s) => window.onCloudStatus?.(s);
+let current = null;
+const setStatus = (s) => {
+  if (s === current) return;
+  current = s;
+  window.onCloudStatus?.(s);
+};
 
 async function start() {
   const config = window.FIREBASE_CONFIG;
@@ -18,67 +25,57 @@ async function start() {
   ]);
 
   const fbApp = initializeApp(config);
-  let db;
-  try {
-    // Cache IndexedDB : lecture hors-ligne et file d'attente des ajouts.
-    db = fs.initializeFirestore(fbApp, {
-      localCache: fs.persistentLocalCache({ tabManager: fs.persistentMultipleTabManager() }),
-    });
-  } catch {
-    db = fs.getFirestore(fbApp);
-  }
+  // Pas de cache Firestore : la copie hors-ligne est gérée par app.js.
+  const db = fs.getFirestore(fbApp);
   const auth = au.getAuth(fbApp);
   const pairsCol = fs.collection(db, 'pairs');
 
   // Connexion anonyme : identifie chaque téléphone pour qu'il ne puisse
-  // supprimer que ses propres paires.
-  // Hors-ligne, la session déjà enregistrée sur le téléphone suffit.
+  // supprimer que ses propres paires. La session est gardée sur le téléphone.
   await auth.authStateReady();
   const user = auth.currentUser || (await au.signInAnonymously(auth)).user;
 
-  const report = (err) => {
-    console.error(err);
-    alert(err?.code === 'permission-denied'
-      ? 'Refusé par le serveur (mots trop longs ou paire invalide).'
-      : 'Erreur lors de la synchronisation des mots.');
-  };
-
   window.cloud = {
-    add(a, b) {
-      fs.addDoc(pairsCol, {
+    uid: user.uid,
+    // Identifiant choisi par l'appli : renvoyer la même paire ne crée jamais de doublon.
+    add({ id, a, b, cat }) {
+      return fs.setDoc(fs.doc(db, 'pairs', id), {
         a: a.slice(0, MAX_LEN),
         b: b.slice(0, MAX_LEN),
+        cat: cat.slice(0, MAX_CAT_LEN),
         by: user.uid,
         createdAt: fs.serverTimestamp(),
-      }).catch(report);
+      });
     },
     remove(id) {
-      fs.deleteDoc(fs.doc(db, 'pairs', id)).catch(report);
+      return fs.deleteDoc(fs.doc(db, 'pairs', id)).catch((err) => {
+        console.error(err);
+        alert('Suppression impossible.');
+      });
     },
   };
 
   fs.onSnapshot(pairsCol, { includeMetadataChanges: true }, (snap) => {
-    const pairs = snap.docs.map((d) => {
-      const data = d.data({ serverTimestamps: 'estimate' });
-      return {
-        id: d.id,
-        a: data.a,
-        b: data.b,
-        mine: data.by === user.uid,
-        pending: d.metadata.hasPendingWrites,
-        t: data.createdAt?.toMillis?.() || 0,
-      };
-    }).sort((x, y) => y.t - x.t);
-    setStatus(snap.metadata.fromCache ? 'offline' : 'online');
-    window.onSharedPairs?.(pairs);
+    // Seules les listes venant du serveur remplacent la copie du téléphone.
+    if (snap.metadata.fromCache) return;
+    const pairs = snap.docs
+      .filter((d) => !d.metadata.hasPendingWrites)
+      .map((d) => {
+        const { a, b, cat, by } = d.data();
+        return { id: d.id, a, b, cat, by };
+      });
+    setStatus('online');
+    window.onPairs?.(pairs);
   }, (err) => {
     console.error(err);
     setStatus('error');
   });
+
+  window.addEventListener('offline', () => setStatus('offline'));
 }
 
 start().catch((err) => {
   console.error(err);
-  // SDK non chargé (hors-ligne au premier lancement) : on garde la copie locale.
+  // SDK ou connexion indisponible : l'appli continue avec la copie du téléphone.
   setStatus(navigator.onLine ? 'error' : 'offline');
 });

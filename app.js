@@ -1,44 +1,73 @@
 const STORAGE_KEY = 'undercover-v1';
+const PAIRS_KEY = 'undercover-pairs';
 const POINTS = { civil: 2, under: 10, white: 6 };
 const ROLE_LABEL = { civil: 'Civil', under: 'Undercover', white: 'Mr. White' };
-const CUSTOM_CAT = 'Mots perso';
-const SHARED_CAT = 'Mots partagés';
-const SHARED_KEY = 'undercover-shared';
+const DEFAULT_CAT = 'Divers';
+const NEW_CAT = '__new';
 
 const app = document.getElementById('app');
 
-let state = load() || {
+let state = load() || {};
+state = {
   players: [],
   undercover: 1,
   white: 0,
-  categories: Object.keys(WORD_CATEGORIES),
-  customPairs: [],
+  disabledCats: [],
+  pendingPairs: [], // ajoutées hors-ligne, envoyées dès que la connexion revient
   scores: {},
   usedPairs: [],
   screen: 'home',
   game: null,
+  ...state,
 };
+// Ancienne version : paires gardées seulement sur le téléphone → à envoyer dans la base.
+if (state.customPairs) {
+  for (const [a, b] of state.customPairs) state.pendingPairs.push({ id: newId(), a, b, cat: 'Mots perso' });
+  delete state.customPairs;
+}
+delete state.categories;
 let ui = { overlay: null, peek: null };
 
-// Paires partagées via Firebase (cloud.js). Copie locale pour jouer hors-ligne
-// même si le SDK Firebase ne se charge pas.
-let sharedPairs = [];
-try { sharedPairs = JSON.parse(localStorage.getItem(SHARED_KEY)) || []; } catch {}
+// Toutes les paires viennent de la base Firestore (cloud.js). La dernière liste
+// reçue est gardée sur le téléphone pour jouer sans connexion.
+let pairsCache = { pairs: [], syncedAt: 0 };
+try { pairsCache = JSON.parse(localStorage.getItem(PAIRS_KEY)) || pairsCache; } catch {}
 let cloudStatus = 'off'; // off | connecting | online | offline | error
 
-window.onSharedPairs = (pairs) => {
-  sharedPairs = pairs;
-  try { localStorage.setItem(SHARED_KEY, JSON.stringify(pairs)); } catch {}
-  if (pairs.length && !state.sharedCatInit) {
-    state.sharedCatInit = true;
-    if (!state.categories.includes(SHARED_CAT)) state.categories.push(SHARED_CAT);
-  }
-  if (['home', 'custom'].includes(state.screen)) render();
+window.onPairs = (pairs) => {
+  pairsCache = { pairs, syncedAt: Date.now() };
+  try { localStorage.setItem(PAIRS_KEY, JSON.stringify(pairsCache)); } catch {}
+  // Une paire en attente qui apparaît dans la base est bien arrivée.
+  const ids = new Set(pairs.map((p) => p.id));
+  state.pendingPairs = state.pendingPairs.filter((p) => !ids.has(p.id));
+  if (['home', 'custom'].includes(state.screen)) render(); else save();
 };
 window.onCloudStatus = (status) => {
   cloudStatus = status;
-  if (state.screen === 'custom') render();
+  if (window.cloud) state.uid = window.cloud.uid;
+  if (status === 'online') flushPending();
+  if (['home', 'custom'].includes(state.screen)) render();
 };
+
+const sending = new Set();
+
+function sendPair(p) {
+  if (sending.has(p.id)) return;
+  sending.add(p.id);
+  window.cloud.add(p)
+    .catch((err) => {
+      // Refusée par les règles (paire invalide ou déjà envoyée) : inutile de réessayer.
+      if (err?.code !== 'permission-denied') return;
+      if (!pairsCache.pairs.some((x) => x.id === p.id)) alert(`Paire « ${p.a} / ${p.b} » refusée par le serveur.`);
+      state.pendingPairs = state.pendingPairs.filter((x) => x.id !== p.id);
+      if (['home', 'custom'].includes(state.screen)) render(); else save();
+    })
+    .finally(() => sending.delete(p.id));
+}
+
+function flushPending() {
+  state.pendingPairs.forEach(sendPair);
+}
 
 function load() {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY)); } catch { return null; }
@@ -47,16 +76,26 @@ function save() {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
 }
 
+function newId() {
+  const bytes = crypto.getRandomValues(new Uint8Array(15));
+  return Array.from(bytes, (b) => 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[b % 62]).join('');
+}
+
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const shuffle = (a) => { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 const pick = (a) => a[Math.floor(Math.random() * a.length)];
 const normalize = (s) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const collator = new Intl.Collator('fr');
+
+// Paires de la base + celles en attente d'envoi.
+function allPairs() {
+  return [...pairsCache.pairs, ...state.pendingPairs.map((p) => ({ ...p, pending: true }))];
+}
 
 function allCategories() {
-  const cats = { ...WORD_CATEGORIES };
-  if (sharedPairs.length) cats[SHARED_CAT] = sharedPairs.map((p) => [p.a, p.b]);
-  if (state.customPairs.length) cats[CUSTOM_CAT] = state.customPairs;
-  return cats;
+  const cats = {};
+  for (const p of allPairs()) (cats[p.cat || DEFAULT_CAT] ||= []).push([p.a, p.b]);
+  return Object.fromEntries(Object.entries(cats).sort(([x], [y]) => collator.compare(x, y)));
 }
 
 function limits() {
@@ -72,7 +111,7 @@ function canStart() {
 
 function pairPool() {
   const cats = allCategories();
-  return state.categories.filter((c) => cats[c]).flatMap((c) => cats[c]);
+  return Object.keys(cats).filter((c) => !state.disabledCats.includes(c)).flatMap((c) => cats[c]);
 }
 
 function choosePair() {
@@ -174,7 +213,7 @@ function afterReveal() {
 function render() {
   const screens = { home, custom, scores, deal, game, whiteGuess, reveal, end };
   // Conserve la saisie en cours si la liste partagée se met à jour pendant qu'on tape.
-  const typed = [...app.querySelectorAll('input[name]')].map((i) => [i.closest('form')?.dataset.form, i.name, i.value]);
+  const typed = [...app.querySelectorAll('input[name], select[name]')].map((i) => [i.closest('form')?.dataset.form, i.name, i.value]);
   const focused = document.activeElement?.name;
   app.innerHTML = (screens[state.screen] || home)() + overlay();
   for (const [form, name, value] of typed) {
@@ -182,6 +221,7 @@ function render() {
     if (el && value) el.value = value;
   }
   if (focused) app.querySelector(`input[name="${focused}"]`)?.focus();
+  syncNewCat();
   save();
   const input = app.querySelector('[autofocus]');
   if (input && !('ontouchstart' in window)) input.focus();
@@ -195,6 +235,7 @@ function home() {
   if (n < 3) warning = 'Il faut au moins 3 joueurs.';
   else if (state.undercover + state.white < 1) warning = 'Il faut au moins un Undercover ou un Mr. White.';
   else if (civil < 2 || state.undercover + state.white > civil) warning = 'Trop d\'imposteurs pour le nombre de joueurs.';
+  else if (!pairsCache.pairs.length && !state.pendingPairs.length) warning = 'Aucun mot sur ce téléphone : lance l\'appli une première fois avec internet pour les télécharger.';
   else if (!poolSize) warning = 'Sélectionne au moins une catégorie.';
 
   return `
@@ -233,13 +274,14 @@ function home() {
       </div>
       <div class="chips">
         ${Object.keys(cats).map((c) => `
-          <button class="chip ${state.categories.includes(c) ? 'on' : ''}" data-action="toggleCat" data-cat="${esc(c)}">${esc(c)} · ${cats[c].length}</button>`).join('')}
+          <button class="chip ${state.disabledCats.includes(c) ? '' : 'on'}" data-action="toggleCat" data-cat="${esc(c)}">${esc(c)} · ${cats[c].length}</button>`).join('')
+          || `<p class="muted">${cloudStatus === 'connecting' ? 'Téléchargement des mots…' : 'Aucune catégorie.'}</p>`}
       </div>
-      <p class="muted">${poolSize} paires de mots sélectionnées</p>
+      <p class="muted">${poolSize} paires sélectionnées · ${syncLabel()}</p>
     </div>
 
     <div class="row">
-      <button class="grow" data-action="go" data-screen="custom">✏️ Ajouter des mots</button>
+      <button class="grow" data-action="go" data-screen="custom">✏️ Ajouter une paire</button>
       <button class="grow" data-action="go" data-screen="scores">🏆 Scores</button>
     </div>
 
@@ -260,56 +302,58 @@ function stepper(label, cls, key, val) {
     </div>`;
 }
 
-const CLOUD_LABEL = {
-  off: 'Partage non configuré : les mots restent sur ce téléphone.',
-  connecting: 'Connexion…',
-  online: '☁️ Connecté : les mots ajoutés sont visibles par tout le monde.',
-  offline: '📴 Hors-ligne : tes ajouts seront envoyés au retour du réseau.',
-  error: '⚠️ Impossible de joindre le serveur de mots partagés.',
-};
-const cloudReady = () => !!window.cloud && cloudStatus !== 'error';
+function syncLabel() {
+  if (cloudStatus === 'online') return '☁️ à jour';
+  if (cloudStatus === 'connecting') return 'mise à jour…';
+  if (!pairsCache.syncedAt) return 'jamais synchronisé';
+  const d = new Date(pairsCache.syncedAt);
+  return `📴 hors-ligne, mots du ${d.toLocaleDateString('fr-FR')}`;
+}
 
 function custom() {
-  const shared = cloudReady();
-  const mine = sharedPairs.filter((p) => p.mine);
-  const others = sharedPairs.length - mine.length;
+  const cats = Object.keys(allCategories());
+  const uid = window.cloud?.uid || state.uid;
+  const mine = allPairs().filter((p) => p.pending || (uid && p.by === uid));
+  const selected = cats.includes(state.lastCat) ? state.lastCat : cats[0];
+  const online = cloudStatus === 'online';
   return `
     <div class="row"><button class="ghost" data-action="go" data-screen="home">← Retour</button></div>
-    <h2>Ajouter des mots</h2>
-    <p class="muted">${!window.cloud && cloudStatus === 'offline'
-      ? '📴 Hors-ligne : tes ajouts restent sur ce téléphone, tu pourras les partager plus tard.'
-      : CLOUD_LABEL[cloudStatus]}</p>
+    <h2>Ajouter une paire</h2>
+    <p class="muted">${online
+      ? '☁️ Connecté : la paire sera visible par tout le monde.'
+      : '📴 Hors-ligne : la paire sera envoyée automatiquement au prochain lancement avec internet.'}</p>
     <form class="card" data-form="addPair">
       <input type="text" name="a" placeholder="Mot 1 (ex : Pizza)" maxlength="40" autocomplete="off">
       <input type="text" name="b" placeholder="Mot 2 proche (ex : Quiche)" maxlength="40" autocomplete="off">
-      <button class="primary" type="submit">${shared ? 'Ajouter pour tout le monde' : 'Ajouter sur ce téléphone'}</button>
+      <label class="muted" for="cat">Catégorie</label>
+      <select name="cat" id="cat">
+        ${cats.map((c) => `<option value="${esc(c)}" ${c === selected ? 'selected' : ''}>${esc(c)}</option>`).join('')}
+        <option value="${NEW_CAT}" ${cats.length ? '' : 'selected'}>➕ Nouvelle catégorie…</option>
+      </select>
+      <input type="text" name="newCat" placeholder="Nom de la nouvelle catégorie" maxlength="30" autocomplete="off">
+      <button class="primary" type="submit">Ajouter</button>
     </form>
-    ${sharedPairs.length || shared ? `
-      <h2>${SHARED_CAT} (${sharedPairs.length})</h2>
-      <p class="muted">${others ? `${others} ajoutée${others > 1 ? 's' : ''} par les autres. ` : ''}Tu peux supprimer uniquement celles que tu as ajoutées.</p>
-      <div class="list">
-        ${mine.map((p) => `
-          <div class="item"><span>${esc(p.a)} / ${esc(p.b)}${p.pending ? ' <span class="muted">· envoi…</span>' : ''}</span>
-            <button class="ghost small" data-action="removeShared" data-id="${esc(p.id)}">✕</button></div>`).join('')
-          || '<p class="muted center">Tu n\'as encore rien ajouté.</p>'}
-      </div>` : ''}
-    ${state.customPairs.length ? `
-      <h2>Sur ce téléphone uniquement (${state.customPairs.length})</h2>
-      <div class="list">
-        ${state.customPairs.map((p, i) => `
-          <div class="item"><span>${esc(p[0])} / ${esc(p[1])}</span>
-            <span class="row">
-              ${shared ? `<button class="ghost small" data-action="sharePair" data-i="${i}">☁️ Partager</button>` : ''}
-              <button class="ghost small" data-action="removePair" data-i="${i}">✕</button>
-            </span></div>`).join('')}
-      </div>` : ''}
+    <h2>Mes paires (${mine.length})</h2>
+    <div class="list">
+      ${mine.map((p) => `
+        <div class="item"><span>${esc(p.a)} / ${esc(p.b)} <span class="muted">· ${esc(p.cat || DEFAULT_CAT)}${p.pending ? ' · en attente' : ''}</span></span>
+          <button class="ghost small" data-action="removePair" data-id="${esc(p.id)}">✕</button></div>`).join('')
+        || '<p class="muted center">Tu n\'as encore rien ajouté.</p>'}
+    </div>
   `;
+}
+
+// Affiche le champ « nouvelle catégorie » seulement quand on l'a choisi.
+function syncNewCat() {
+  const select = app.querySelector('select[name="cat"]');
+  const input = app.querySelector('input[name="newCat"]');
+  if (select && input) input.hidden = select.value !== NEW_CAT;
 }
 
 function pairExists(a, b) {
   const key = (x, y) => [normalize(x), normalize(y)].sort().join('|');
   const k = key(a, b);
-  return Object.values(allCategories()).some((pairs) => pairs.some((p) => key(p[0], p[1]) === k));
+  return allPairs().some((p) => key(p.a, p.b) === k);
 }
 
 function scores() {
@@ -498,22 +542,22 @@ const actions = {
   inc: (d) => { state[d.key]++; },
   dec: (d) => { state[d.key] = Math.max(0, state[d.key] - 1); },
   toggleCat: (d) => {
-    const i = state.categories.indexOf(d.cat);
-    if (i >= 0) state.categories.splice(i, 1); else state.categories.push(d.cat);
+    const i = state.disabledCats.indexOf(d.cat);
+    if (i >= 0) state.disabledCats.splice(i, 1); else state.disabledCats.push(d.cat);
   },
   toggleAllCats: () => {
-    const all = Object.keys(allCategories());
-    state.categories = state.categories.length === all.length ? [] : all;
+    state.disabledCats = state.disabledCats.length ? [] : Object.keys(allCategories());
   },
-  removePair: (d) => { state.customPairs.splice(+d.i, 1); },
-  removeShared: (d) => {
-    const p = sharedPairs.find((x) => x.id === d.id);
-    if (p) confirm(`Supprimer « ${p.a} / ${p.b} » pour tout le monde ?`, () => window.cloud.remove(p.id));
-  },
-  sharePair: (d) => {
-    const [a, b] = state.customPairs[+d.i];
-    window.cloud.add(a, b);
-    state.customPairs.splice(+d.i, 1);
+  removePair: (d) => {
+    const p = allPairs().find((x) => x.id === d.id);
+    if (!p) return;
+    if (p.pending) {
+      state.pendingPairs = state.pendingPairs.filter((x) => x.id !== p.id);
+    } else if (cloudStatus !== 'online') {
+      alert('Il faut être connecté pour supprimer une paire.');
+    } else {
+      confirm(`Supprimer « ${p.a} / ${p.b} » pour tout le monde ?`, () => window.cloud.remove(p.id));
+    }
   },
   resetScores: () => confirm('Remettre tous les scores à zéro ?', () => { state.scores = {}; }),
   start: () => { if (canStart()) startGame(); },
@@ -542,16 +586,19 @@ const forms = {
   },
   addPair: (f) => {
     const a = f.elements.a.value.trim(), b = f.elements.b.value.trim();
+    let cat = f.elements.cat.value === NEW_CAT ? f.elements.newCat.value.trim() : f.elements.cat.value;
     if (!a || !b) return false;
+    if (!cat) { alert('Choisis ou crée une catégorie.'); return false; }
     if (normalize(a) === normalize(b)) { alert('Les deux mots doivent être différents.'); return false; }
     if (pairExists(a, b)) { alert('Cette paire existe déjà.'); return false; }
-    f.reset(); // avant l'envoi : la mise à jour de la liste re-rend l'écran
-    if (cloudReady()) {
-      window.cloud.add(a, b);
-    } else {
-      state.customPairs.push([a, b]);
-      if (!state.categories.includes(CUSTOM_CAT)) state.categories.push(CUSTOM_CAT);
-    }
+    // Réutilise une catégorie existante écrite différemment (accents, majuscules).
+    cat = Object.keys(allCategories()).find((c) => normalize(c) === normalize(cat)) || cat;
+    const pair = { id: newId(), a, b, cat };
+    state.pendingPairs.push(pair);
+    state.lastCat = cat;
+    f.elements.a.value = f.elements.b.value = f.elements.newCat.value = '';
+    f.elements.cat.value = cat;
+    if (cloudStatus === 'online') sendPair(pair);
   },
   whiteGuess: (f) => {
     const guess = f.elements.guess.value.trim();
@@ -580,6 +627,13 @@ app.addEventListener('submit', (e) => {
   render();
   const again = app.querySelector(`[data-form="${form.dataset.form}"] input`);
   if (again && form.dataset.form !== 'whiteGuess') again.focus();
+});
+
+app.addEventListener('change', (e) => {
+  if (e.target.name === 'cat') {
+    syncNewCat();
+    if (e.target.value === NEW_CAT) app.querySelector('input[name="newCat"]').focus();
+  }
 });
 
 // Sécurité : on ne rouvre jamais l'app sur un mot affiché.

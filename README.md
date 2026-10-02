@@ -1,13 +1,14 @@
 # Undercover entre potes
 
-Clone du jeu Undercover : plus de 800 paires de mots dans 20 catégories, plus tes propres mots.
+Clone du jeu Undercover. Toutes les paires de mots sont dans une base Firebase partagée : chacun peut en ajouter
+depuis l'appli, dans une catégorie existante ou nouvelle.
 C'est une web-app installable (PWA) : elle marche sur iPhone et Android et fonctionne hors-ligne une fois ouverte.
 
 ## Mise en ligne automatique (GitHub Pages + GitHub Actions)
 Adresse du jeu : **https://aaqui-nas.github.io/UnderCover/**
 
 À chaque `git push` sur `main`, le workflow `.github/workflows/deploy.yml` :
-1. vérifie la syntaxe du JavaScript et la liste de mots (`scripts/check-words.js` : pas de doublon ni de paire invalide) ;
+1. vérifie la syntaxe du JavaScript ;
 2. publie le site sur GitHub Pages ;
 3. change la version du cache hors-ligne, pour que les téléphones récupèrent la mise à jour.
 
@@ -18,8 +19,8 @@ Mise en place (une seule fois) :
 2. Dépôt → Settings → Pages → *Source* : **GitHub Actions**.
 3. `git push -u origin main`
 
-## Mots partagés entre tous les joueurs (Firebase, gratuit)
-Sans cette étape, l'appli marche, mais les mots ajoutés restent sur chaque téléphone.
+## Base de mots (Firebase, gratuit)
+Déjà configurée (projet `undercover-12e56`). Pour repartir de zéro sur un autre projet :
 
 1. Va sur https://console.firebase.google.com → **Créer un projet** (ex. `undercover`). Tu peux désactiver Google Analytics.
 2. **Authentication** → Commencer → onglet *Mode de connexion* → **Anonyme** → Activer → Enregistrer.
@@ -31,8 +32,13 @@ Sans cette étape, l'appli marche, mais les mots ajoutés restent sur chaque té
    `window.FIREBASE_CONFIG = { apiKey: "...", authDomain: "...", ... };`
 7. `git add . && git commit -m "Firebase" && git push` → déployé automatiquement.
 
-Dans l'appli, « ✏️ Ajouter des mots » affiche alors « ☁️ Connecté ». Les paires ajoutées apparaissent chez tout le monde
-dans la catégorie « Mots partagés ». Chacun ne peut supprimer que ses propres ajouts.
+Fonctionnement :
+- Au lancement avec internet, l'appli télécharge toute la liste et la garde sur le téléphone ; sans internet elle joue
+  avec la dernière liste téléchargée. Il faut donc internet au moins une fois, au tout premier lancement.
+- « ✏️ Ajouter une paire » : deux mots + une catégorie (existante ou nouvelle). Hors-ligne, la paire est mise en attente,
+  jouable tout de suite, et envoyée automatiquement au prochain lancement avec internet.
+- Chacun ne peut supprimer que ses propres ajouts. Les paires se gèrent aussi dans la console Firebase
+  (Firestore → collection `pairs` ; champs `a`, `b`, `cat`).
 La clé `apiKey` n'est pas secrète, c'est normal qu'elle soit publique : la protection vient des règles Firestore.
 
 ## Installer sur le téléphone
@@ -48,4 +54,4 @@ Le `.apk` du zip s'installe directement (autoriser « sources inconnues »). Ça
 
 ## Mettre à jour
 Modifie, puis `git add . && git commit -m "..." && git push` : le déploiement se fait tout seul.
-Les mots sont dans `words.js` : ajoute des paires `["Mot civil", "Mot undercover"]` où tu veux.
+Les mots ne sont pas dans le code : ajoute-les depuis l'appli.
