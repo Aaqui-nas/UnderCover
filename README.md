@@ -35,10 +35,15 @@ Déjà configurée (projet `undercover-12e56`). Pour repartir de zéro sur un au
 Fonctionnement :
 - Au lancement avec internet, l'appli télécharge toute la liste et la garde sur le téléphone ; sans internet elle joue
   avec la dernière liste téléchargée. Il faut donc internet au moins une fois, au tout premier lancement.
-- « Ajouter une paire » : deux mots + une catégorie (existante ou nouvelle). Hors-ligne, la paire est mise en attente,
-  jouable tout de suite, et envoyée automatiquement au prochain lancement avec internet.
-- Chacun ne peut supprimer que ses propres ajouts. Les paires se gèrent aussi dans la console Firebase
-  (Firestore → collection `pairs` ; champs `a`, `b`, `cat`).
+- « Gérer les paires » : toutes les paires de la base par catégorie, avec recherche. Chacun peut en ajouter
+  (deux mots + une catégorie existante ou nouvelle) et en supprimer. Hors-ligne, une paire ajoutée est mise en
+  attente, jouable tout de suite, et envoyée au prochain lancement avec internet ; la suppression demande internet.
+- Les paires se gèrent aussi dans la console Firebase (Firestore → collection `pairs` ; champs `a`, `b`, `cat`).
+
+## Chrono de discussion
+Réglé sur l'accueil avant la partie : sans, 1, 2, 3 ou 5 minutes par tour. Il démarre à chaque tour (pause et relance
+possibles), puis sonne et vibre à zéro. L'écran reste allumé pendant le décompte.
+Sur iPhone : pas de vibration (non supportée par Safari), et pas de son si le téléphone est en mode silencieux.
 La clé `apiKey` n'est pas secrète, c'est normal qu'elle soit publique : la protection vient des règles Firestore.
 
 ## Installer sur le téléphone

@@ -3,6 +3,7 @@ const PAIRS_KEY = 'undercover-pairs';
 const POINTS = { civil: 2, under: 10, white: 6 };
 const ROLE_LABEL = { civil: 'Civil', under: 'Undercover', white: 'Mr. White' };
 const DEFAULT_CAT = 'Divers';
+const TIMER_CHOICES = [0, 60, 120, 180, 300];
 const NEW_CAT = '__new';
 
 const app = document.getElementById('app');
@@ -16,17 +17,19 @@ state = {
   pendingPairs: [], // ajoutées hors-ligne, envoyées dès que la connexion revient
   scores: {},
   usedPairs: [],
+  timer: 120, // durée de discussion par tour, en secondes (0 = sans chrono)
   screen: 'home',
   game: null,
   ...state,
 };
+if (state.screen === 'custom') state.screen = 'pairs';
 // Ancienne version : paires gardées seulement sur le téléphone → à envoyer dans la base.
 if (state.customPairs) {
   for (const [a, b] of state.customPairs) state.pendingPairs.push({ id: newId(), a, b, cat: 'Mots perso' });
   delete state.customPairs;
 }
 delete state.categories;
-let ui = { overlay: null, peek: null };
+let ui = { overlay: null, peek: null, search: '', addOpen: false };
 
 // Toutes les paires viennent de la base Firestore (cloud.js). La dernière liste
 // reçue est gardée sur le téléphone pour jouer sans connexion.
@@ -40,13 +43,13 @@ window.onPairs = (pairs) => {
   // Une paire en attente qui apparaît dans la base est bien arrivée.
   const ids = new Set(pairs.map((p) => p.id));
   state.pendingPairs = state.pendingPairs.filter((p) => !ids.has(p.id));
-  if (['home', 'custom'].includes(state.screen)) render(); else save();
+  if (['home', 'pairs'].includes(state.screen)) render(); else save();
 };
 window.onCloudStatus = (status) => {
   cloudStatus = status;
   if (window.cloud) state.uid = window.cloud.uid;
   if (status === 'online') flushPending();
-  if (['home', 'custom'].includes(state.screen)) render();
+  if (['home', 'pairs'].includes(state.screen)) render();
 };
 
 const sending = new Set();
@@ -60,7 +63,7 @@ function sendPair(p) {
       if (err?.code !== 'permission-denied') return;
       if (!pairsCache.pairs.some((x) => x.id === p.id)) toast(`Paire « ${p.a} / ${p.b} » refusée par le serveur.`);
       state.pendingPairs = state.pendingPairs.filter((x) => x.id !== p.id);
-      if (['home', 'custom'].includes(state.screen)) render(); else save();
+      if (['home', 'pairs'].includes(state.screen)) render(); else save();
     })
     .finally(() => sending.delete(p.id));
 }
@@ -206,8 +209,87 @@ function afterReveal() {
   if (winner) return endGame(winner);
   state.game.round++;
   pickStarter();
+  startTimer();
   state.screen = 'game';
 }
+
+// ---------- Chrono de discussion ----------
+
+function startTimer() {
+  const g = state.game;
+  g.timer = state.timer ? { total: state.timer * 1000, endsAt: Date.now() + state.timer * 1000, left: null, done: false } : null;
+}
+
+function timeLeft(t) {
+  return Math.max(0, t.endsAt ? t.endsAt - Date.now() : t.left);
+}
+
+const fmt = (ms) => {
+  const sec = Math.ceil(ms / 1000);
+  return `${pad(Math.floor(sec / 60))}:${pad(sec % 60)}`;
+};
+
+let audio = null;
+// iOS n'autorise le son qu'après un geste : on prépare l'audio au premier toucher.
+function unlockAudio() {
+  if (audio) return;
+  try {
+    audio = new (window.AudioContext || window.webkitAudioContext)();
+    const o = audio.createOscillator(), gain = audio.createGain();
+    gain.gain.value = 0;
+    o.connect(gain).connect(audio.destination);
+    o.start(); o.stop(audio.currentTime + 0.01);
+  } catch { audio = null; }
+}
+
+function alarm() {
+  navigator.vibrate?.([300, 120, 300, 120, 500]);
+  if (!audio) return;
+  audio.resume?.();
+  [0, 0.28, 0.56].forEach((at, i) => {
+    const o = audio.createOscillator(), gain = audio.createGain();
+    o.type = 'square';
+    o.frequency.value = i === 2 ? 660 : 880;
+    gain.gain.setValueAtTime(0.18, audio.currentTime + at);
+    gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + at + 0.22);
+    o.connect(gain).connect(audio.destination);
+    o.start(audio.currentTime + at);
+    o.stop(audio.currentTime + at + 0.24);
+  });
+}
+
+// Garde l'écran allumé pendant le chrono : en veille, le téléphone ne sonnerait pas.
+let wakeLock = null;
+async function keepAwake(on) {
+  try {
+    if (on && !wakeLock && navigator.wakeLock) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } else if (!on && wakeLock) {
+      await wakeLock.release();
+    }
+  } catch { wakeLock = null; }
+}
+// Le verrou saute quand l'appli passe en arrière-plan : on le reprend au retour.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') render();
+});
+
+// Met à jour l'affichage sans tout redessiner (garde la page fluide).
+setInterval(() => {
+  const t = state.game?.timer;
+  if (state.screen !== 'game' || !t || t.done) return;
+  const left = timeLeft(t);
+  const clock = app.querySelector('[data-clock]');
+  const bar = app.querySelector('[data-bar]');
+  if (clock) clock.textContent = fmt(left);
+  if (bar) bar.style.transform = `scaleX(${left / t.total})`;
+  if (left <= 0) {
+    t.done = true;
+    alarm();
+    render();
+  }
+}, 250);
 
 // ---------- Rendering ----------
 
@@ -224,7 +306,7 @@ const roleClass = (r) => `c-${r}`;
 const backLink = () => `<button class="link back" data-action="go" data-screen="home">${icon('back')} Retour</button>`;
 
 function render() {
-  const screens = { home, custom, scores, deal, game, whiteGuess, reveal, end };
+  const screens = { home, pairs: pairsScreen, scores, deal, game, whiteGuess, reveal, end };
   // Conserve la saisie en cours si la liste partagée se met à jour pendant qu'on tape.
   const typed = [...app.querySelectorAll('input[name], select[name]')].map((i) => [i.closest('form')?.dataset.form, i.name, i.value]);
   const focused = document.activeElement?.name;
@@ -235,6 +317,7 @@ function render() {
   }
   if (focused) app.querySelector(`input[name="${focused}"]`)?.focus();
   syncNewCat();
+  keepAwake(state.screen === 'game' && !!state.game?.timer && !state.game.timer.done);
   save();
   const input = app.querySelector('[autofocus]');
   if (input && !('ontouchstart' in window)) input.focus();
@@ -327,8 +410,17 @@ function home() {
       </div>` : `<p class="empty">${cloudStatus === 'connecting' ? 'Téléchargement des mots…' : 'Aucune catégorie pour l\'instant.'}</p>`}
     </section>
 
+    <section class="section">
+      <div class="section-head"><span class="label"><span class="num">04</span>Chrono de discussion</span></div>
+      <div class="segmented" role="radiogroup" aria-label="Durée de discussion par tour">
+        ${TIMER_CHOICES.map((v) => `
+          <button class="seg ${state.timer === v ? 'on' : ''}" role="radio" aria-checked="${state.timer === v}" data-action="setTimer" data-v="${v}">${v ? `${v / 60} min` : 'Sans'}</button>`).join('')}
+      </div>
+      <p class="sub">${state.timer ? `Chaque tour dure ${state.timer / 60} min, puis ça sonne : place au vote.` : 'Pas de limite de temps.'}</p>
+    </section>
+
     <div class="links">
-      <button class="link" data-action="go" data-screen="custom">Ajouter une paire</button>
+      <button class="link" data-action="go" data-screen="pairs">Gérer les paires</button>
       <button class="link" data-action="go" data-screen="scores">Scores</button>
     </div>
 
@@ -352,44 +444,62 @@ function roleColumn(label, cls, key) {
     </div>`;
 }
 
-function custom() {
+function pairsScreen() {
   const cats = Object.keys(allCategories());
-  const uid = window.cloud?.uid || state.uid;
-  const mine = allPairs().filter((p) => p.pending || (uid && p.by === uid));
   const selected = cats.includes(state.lastCat) ? state.lastCat : cats[0];
   const online = cloudStatus === 'online';
   return `
     ${backLink()}
-    <div class="screen-head"><h2 class="display">Nouvelle paire</h2></div>
+    <div class="screen-head"><h2 class="display">Les paires</h2><span class="label">${allPairs().length} au total</span></div>
     <p class="muted">${online
-      ? 'Connecté : la paire sera visible par tout le monde.'
-      : 'Hors ligne : la paire sera envoyée au prochain lancement avec internet. Elle est jouable tout de suite sur ce téléphone.'}</p>
-    <form class="form-card" data-form="addPair">
-      <label class="field"><span class="label">Mot 1</span>
-        <input type="text" name="a" placeholder="Pizza" maxlength="40" autocomplete="off"></label>
-      <label class="field"><span class="label">Mot 2, proche du premier</span>
-        <input type="text" name="b" placeholder="Quiche" maxlength="40" autocomplete="off"></label>
-      <label class="field"><span class="label">Catégorie</span>
-        <select name="cat">
-          ${cats.map((c) => `<option value="${esc(c)}" ${c === selected ? 'selected' : ''}>${esc(c)}</option>`).join('')}
-          <option value="${NEW_CAT}" ${cats.length ? '' : 'selected'}>Nouvelle catégorie…</option>
-        </select></label>
-      <label class="field"><span class="label">Nom de la nouvelle catégorie</span>
-        <input type="text" name="newCat" placeholder="Soirées" maxlength="30" autocomplete="off"></label>
-      <button class="btn" type="submit">Ajouter</button>
-    </form>
-    <section class="section">
-      <div class="section-head"><span class="label">Mes paires · ${mine.length}</span></div>
-      ${mine.length ? `<div class="table">
-        ${mine.map((p) => `
-          <div class="tr">
-            <div><div class="strong">${esc(p.a)} / ${esc(p.b)}</div>
-              <div class="sub">${esc(p.cat || DEFAULT_CAT)}${p.pending ? ' · en attente d\'envoi' : ''}</div></div>
-            <button class="icon-btn" data-action="removePair" data-id="${esc(p.id)}" aria-label="Supprimer">${icon('close')}</button>
-          </div>`).join('')}
-      </div>` : '<p class="empty">Tu n\'as encore rien ajouté.</p>'}
-    </section>
+      ? 'Connecté : ajouts et suppressions sont visibles par tout le monde.'
+      : 'Hors ligne : tu peux ajouter des paires (envoyées au retour d\'internet), mais pas en supprimer.'}</p>
+    ${ui.addOpen ? `
+      <form class="form-card adder" data-form="addPair">
+        <label class="field"><span class="label">Mot 1</span>
+          <input type="text" name="a" placeholder="Pizza" maxlength="40" autocomplete="off"></label>
+        <label class="field"><span class="label">Mot 2, proche du premier</span>
+          <input type="text" name="b" placeholder="Quiche" maxlength="40" autocomplete="off"></label>
+        <label class="field"><span class="label">Catégorie</span>
+          <select name="cat">
+            ${cats.map((c) => `<option value="${esc(c)}" ${c === selected ? 'selected' : ''}>${esc(c)}</option>`).join('')}
+            <option value="${NEW_CAT}" ${cats.length ? '' : 'selected'}>Nouvelle catégorie…</option>
+          </select></label>
+        <label class="field"><span class="label">Nom de la nouvelle catégorie</span>
+          <input type="text" name="newCat" placeholder="Soirées" maxlength="30" autocomplete="off"></label>
+        <div class="row2">
+          <button class="btn outline" type="button" data-action="toggleAdd">Fermer</button>
+          <button class="btn" type="submit">Ajouter</button>
+        </div>
+      </form>`
+      : '<button class="btn outline" data-action="toggleAdd">Ajouter une paire</button>'}
+    <input type="search" name="q" value="${esc(ui.search)}" placeholder="Mot ou catégorie" autocomplete="off" enterkeyhint="search">
+    <div id="pair-list">${pairsList()}</div>
   `;
+}
+
+function pairsList() {
+  const q = normalize(ui.search);
+  const groups = {};
+  for (const p of allPairs()) {
+    const cat = p.cat || DEFAULT_CAT;
+    if (q && ![p.a, p.b, cat].some((x) => normalize(x).includes(q))) continue;
+    (groups[cat] ||= []).push(p);
+  }
+  const names = Object.keys(groups).sort(collator.compare);
+  if (!names.length) return `<p class="empty">${ui.search ? 'Aucune paire ne correspond.' : 'Aucune paire pour l\'instant.'}</p>`;
+  return names.map((cat) => `
+    <section class="section group">
+      <div class="section-head"><span class="label">${esc(cat)} · ${groups[cat].length}</span></div>
+      <div class="table">
+        ${groups[cat].sort((x, y) => collator.compare(x.a, y.a)).map((p) => `
+          <div class="tr">
+            <span class="strong fill">${esc(p.a)} <span class="slash">/</span> ${esc(p.b)}</span>
+            ${p.pending ? '<span class="mini-stamp c-under">En attente</span>' : ''}
+            <button class="icon-btn" data-action="removePair" data-id="${esc(p.id)}" aria-label="Supprimer ${esc(p.a)} / ${esc(p.b)}">${icon('close')}</button>
+          </div>`).join('')}
+      </div>
+    </section>`).join('');
 }
 
 // Affiche le champ « nouvelle catégorie » seulement quand on l'a choisi.
@@ -471,6 +581,7 @@ function game() {
   return `
     <div class="screen-head"><h2 class="display">Tour ${pad(g.round)}</h2>
       <button class="link" data-action="openPeek">Revoir mon mot</button></div>
+    ${timerBlock()}
     <div class="speaker">
       <span class="label">Premier à parler</span>
       <span class="who">${esc(g.starter)}</span>
@@ -488,6 +599,30 @@ function game() {
     <div class="grow"></div>
     <button class="link center" data-action="quit">Abandonner la partie</button>
   `;
+}
+
+function timerBlock() {
+  const t = state.game.timer;
+  if (!t) return '';
+  if (t.done) {
+    return `
+      <div class="timer done">
+        <div class="timer-row"><span class="label">Temps écoulé</span><span class="clock">00:00</span></div>
+        <div class="timer-row"><span class="stamp-inline">Place au vote</span>
+          <button class="link" data-action="timerRestart">Relancer</button></div>
+      </div>`;
+  }
+  const left = timeLeft(t);
+  const paused = !t.endsAt;
+  return `
+    <div class="timer ${paused ? 'paused' : ''}">
+      <div class="timer-row"><span class="label">${paused ? 'En pause' : 'Discussion'}</span><span class="clock" data-clock>${fmt(left)}</span></div>
+      <div class="bar"><span data-bar style="transform:scaleX(${left / t.total})"></span></div>
+      <div class="timer-row">
+        <button class="link" data-action="timerToggle">${paused ? 'Reprendre' : 'Pause'}</button>
+        <button class="link" data-action="timerRestart">Relancer</button>
+      </div>
+    </div>`;
 }
 
 function verdict(label, who, stampText, role) {
@@ -621,7 +756,14 @@ const actions = {
   start: () => { if (canStart()) startGame(); },
   showWord: (d) => { state.game.dealIndex = +d.i; },
   hideWord: () => { const g = state.game; g.players[g.dealIndex].seen = true; g.dealIndex = null; },
-  beginRounds: () => { pickStarter(); state.screen = 'game'; },
+  beginRounds: () => { pickStarter(); startTimer(); state.screen = 'game'; },
+  setTimer: (d) => { state.timer = +d.v; },
+  timerToggle: () => {
+    const t = state.game.timer;
+    if (t.endsAt) { t.left = t.endsAt - Date.now(); t.endsAt = null; } else { t.endsAt = Date.now() + t.left; t.left = null; }
+  },
+  timerRestart: () => startTimer(),
+  toggleAdd: () => { ui.addOpen = !ui.addOpen; },
   openPeek: () => { ui.overlay = { type: 'peek' }; ui.peek = null; },
   peek: (d) => { ui.peek = +d.i; },
   askEliminate: (d) => confirm(`Éliminer ${d.name} ?`, () => eliminate(d.name)),
@@ -668,6 +810,7 @@ const forms = {
 };
 
 app.addEventListener('click', (e) => {
+  unlockAudio();
   const el = e.target.closest('[data-action]');
   if (!el || el.disabled) return;
   const fn = actions[el.dataset.action];
@@ -685,6 +828,14 @@ app.addEventListener('submit', (e) => {
   render();
   const again = app.querySelector(`[data-form="${form.dataset.form}"] input`);
   if (again && form.dataset.form !== 'whiteGuess') again.focus();
+});
+
+// Recherche : on ne redessine que la liste pour garder le clavier ouvert.
+app.addEventListener('input', (e) => {
+  if (e.target.name !== 'q') return;
+  ui.search = e.target.value;
+  const list = app.querySelector('#pair-list');
+  if (list) list.innerHTML = pairsList();
 });
 
 app.addEventListener('change', (e) => {
