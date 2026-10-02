@@ -1,29 +1,52 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    function validWords(d) {
+      return d.a is string && d.a.size() > 0 && d.a.size() <= 40
+        && d.b is string && d.b.size() > 0 && d.b.size() <= 40
+        && d.cat is string && d.cat.size() > 0 && d.cat.size() <= 30;
+    }
+    function validVotes(d) {
+      return (!('up' in d) || (d.up is int && d.up >= 0))
+        && (!('down' in d) || (d.down is int && d.down >= 0));
+    }
+    // Une note ne peut qu'ajouter 1 à « up » ou à « down ».
+    function plusOne(field) {
+      return request.resource.data.get(field, 0) >= resource.data.get(field, 0)
+        && request.resource.data.get(field, 0) <= resource.data.get(field, 0) + 1;
+    }
+
     match /pairs/{pairId} {
-      // Tout le monde peut lire les paires.
       allow read: if true;
 
-      // Ajout : utilisateur connecté (anonyme), deux mots de 1 à 40 caractères,
-      // une catégorie de 1 à 30 caractères, exactement ces champs,
-      // auteur = soi-même, date = heure du serveur.
+      // Ajout (ou restauration depuis la corbeille, qui garde les notes).
       allow create: if request.auth != null
-        && request.resource.data.keys().hasOnly(['a', 'b', 'cat', 'by', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['a', 'b', 'cat', 'by', 'createdAt', 'up', 'down'])
         && request.resource.data.keys().hasAll(['a', 'b', 'cat', 'by', 'createdAt'])
-        && request.resource.data.a is string
-        && request.resource.data.a.size() > 0 && request.resource.data.a.size() <= 40
-        && request.resource.data.b is string
-        && request.resource.data.b.size() > 0 && request.resource.data.b.size() <= 40
-        && request.resource.data.cat is string
-        && request.resource.data.cat.size() > 0 && request.resource.data.cat.size() <= 30
+        && validWords(request.resource.data)
+        && validVotes(request.resource.data)
         && request.resource.data.by == request.auth.uid
         && request.resource.data.createdAt == request.time;
 
-      // Suppression : par n'importe quel joueur connecté.
-      allow delete: if request.auth != null;
+      // Notes : seulement +1 sur « up » ou « down ».
+      allow update: if request.auth != null
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['up', 'down'])
+        && plusOne('up') && plusOne('down');
 
-      allow update: if false;
+      allow delete: if request.auth != null;
+    }
+
+    // Corbeille : historique des paires supprimées, restaurables.
+    match /trash/{trashId} {
+      allow read: if true;
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly(['a', 'b', 'cat', 'up', 'down', 'pairId', 'deletedAt'])
+        && validWords(request.resource.data)
+        && validVotes(request.resource.data)
+        && request.resource.data.pairId is string
+        && request.resource.data.deletedAt == request.time;
+      allow delete: if request.auth != null;
     }
   }
 }

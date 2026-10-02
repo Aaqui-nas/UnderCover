@@ -1,5 +1,7 @@
 const STORAGE_KEY = 'undercover-v1';
 const PAIRS_KEY = 'undercover-pairs';
+const PHOTOS_KEY = 'undercover-photos';
+const BANNED_SCORE = -3; // note nette à partir de laquelle une paire n'est plus tirée
 const POINTS = { civil: 2, under: 10, white: 6 };
 const ROLE_LABEL = { civil: 'Civil', under: 'Undercover', white: 'Mr. White' };
 const DEFAULT_CAT = 'Divers';
@@ -16,20 +18,31 @@ state = {
   disabledCats: [],
   pendingPairs: [], // ajoutées hors-ligne, envoyées dès que la connexion revient
   scores: {},
+  stats: {}, // par joueur : parties, victoires par rôle…
+  rated: {}, // paires déjà notées sur ce téléphone : id → +1 / -1
+  pendingRatings: [], // notes données hors-ligne
   usedPairs: [],
   timer: 120, // durée de discussion par tour, en secondes (0 = sans chrono)
   screen: 'home',
   game: null,
   ...state,
 };
-if (state.screen === 'custom') state.screen = 'pairs';
+if (state.screen === 'custom' || state.screen === 'trash') state.screen = 'pairs';
+if (state.screen === 'profile') state.screen = 'agents';
 // Ancienne version : paires gardées seulement sur le téléphone → à envoyer dans la base.
 if (state.customPairs) {
   for (const [a, b] of state.customPairs) state.pendingPairs.push({ id: newId(), a, b, cat: 'Mots perso' });
   delete state.customPairs;
 }
 delete state.categories;
-let ui = { overlay: null, peek: null, search: '', addOpen: false };
+let ui = { overlay: null, peek: null, search: '', addOpen: false, profile: null, trash: null };
+
+// Photos des joueurs : à part, pour ne pas réécrire des images à chaque sauvegarde.
+let photos = {};
+try { photos = JSON.parse(localStorage.getItem(PHOTOS_KEY)) || {}; } catch {}
+function savePhotos() {
+  try { localStorage.setItem(PHOTOS_KEY, JSON.stringify(photos)); return true; } catch { return false; }
+}
 
 // Toutes les paires viennent de la base Firestore (cloud.js). La dernière liste
 // reçue est gardée sur le téléphone pour jouer sans connexion.
@@ -48,7 +61,7 @@ window.onPairs = (pairs) => {
 window.onCloudStatus = (status) => {
   cloudStatus = status;
   if (window.cloud) state.uid = window.cloud.uid;
-  if (status === 'online') flushPending();
+  if (status === 'online') { flushPending(); flushRatings(); }
   if (['home', 'pairs'].includes(state.screen)) render();
 };
 
@@ -71,6 +84,30 @@ function sendPair(p) {
 function flushPending() {
   state.pendingPairs.forEach(sendPair);
 }
+
+function flushRatings() {
+  const queue = state.pendingRatings;
+  state.pendingRatings = [];
+  for (const r of queue) {
+    window.cloud.rate(r.id, r.v).catch((err) => {
+      // Paire supprimée entre-temps : on oublie la note ; sinon on réessaiera.
+      if (err?.code !== 'not-found' && err?.code !== 'permission-denied') state.pendingRatings.push(r);
+      save();
+    });
+  }
+}
+
+function ratePair(id, v) {
+  if (!id || state.rated[id]) return;
+  state.rated[id] = v;
+  if (cloudStatus === 'online') {
+    window.cloud.rate(id, v).catch(() => state.pendingRatings.push({ id, v }));
+  } else {
+    state.pendingRatings.push({ id, v });
+  }
+}
+
+const netScore = (p) => (p.up || 0) - (p.down || 0);
 
 function load() {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY)); } catch { return null; }
@@ -97,7 +134,7 @@ function allPairs() {
 
 function allCategories() {
   const cats = {};
-  for (const p of allPairs()) (cats[p.cat || DEFAULT_CAT] ||= []).push([p.a, p.b]);
+  for (const p of allPairs()) (cats[p.cat || DEFAULT_CAT] ||= []).push(p);
   return Object.fromEntries(Object.entries(cats).sort(([x], [y]) => collator.compare(x, y)));
 }
 
@@ -114,36 +151,48 @@ function canStart() {
 
 function pairPool() {
   const cats = allCategories();
-  return Object.keys(cats).filter((c) => !state.disabledCats.includes(c)).flatMap((c) => cats[c]);
+  return Object.keys(cats).filter((c) => !state.disabledCats.includes(c)).flatMap((c) => cats[c])
+    .filter((p) => netScore(p) > BANNED_SCORE);
+}
+
+// Tirage pondéré par les notes : une paire appréciée sort plus souvent.
+function weightedPick(pairs) {
+  const weight = (p) => Math.min(3, Math.max(0.25, 1 + 0.25 * netScore(p)));
+  let r = Math.random() * pairs.reduce((sum, p) => sum + weight(p), 0);
+  for (const p of pairs) if ((r -= weight(p)) <= 0) return p;
+  return pairs[pairs.length - 1];
 }
 
 function choosePair() {
   const pool = pairPool();
-  const key = (p) => p.join('|');
+  const key = (p) => `${p.a}|${p.b}`;
   let fresh = pool.filter((p) => !state.usedPairs.includes(key(p)));
   if (!fresh.length) {
     const poolKeys = new Set(pool.map(key));
     state.usedPairs = state.usedPairs.filter((k) => !poolKeys.has(k));
     fresh = pool;
   }
-  const pair = pick(fresh);
+  const pair = weightedPick(fresh);
   state.usedPairs.push(key(pair));
   if (state.usedPairs.length > 1500) state.usedPairs = state.usedPairs.slice(-1500);
-  return Math.random() < 0.5 ? pair : [pair[1], pair[0]];
+  return { pair, words: Math.random() < 0.5 ? [pair.a, pair.b] : [pair.b, pair.a] };
 }
 
 // ---------- Game logic ----------
 
 function startGame() {
-  const [civilWord, underWord] = choosePair();
+  const { pair, words: [civilWord, underWord] } = choosePair();
   const roles = shuffle([
     ...Array(state.undercover).fill('under'),
     ...Array(state.white).fill('white'),
     ...Array(limits().civil).fill('civil'),
   ]);
   state.game = {
+    pairId: pair.pending ? null : pair.id,
     civilWord,
     underWord,
+    elimOrder: [],
+    whiteGuessed: false,
     players: state.players.map((name, i) => ({
       name,
       role: roles[i],
@@ -184,13 +233,23 @@ function checkWinner() {
   return null;
 }
 
+function emptyStats() {
+  return { games: 0, wins: 0, civil: [0, 0], under: [0, 0], white: [0, 0], firstOut: 0, survived: 0, guessed: 0 };
+}
+
 function endGame(winnerRoles) {
   const g = state.game;
   g.winner = winnerRoles;
   for (const p of g.players) {
-    if (winnerRoles.includes(p.role)) {
-      state.scores[p.name] = (state.scores[p.name] || 0) + POINTS[p.role];
-    }
+    const won = winnerRoles.includes(p.role);
+    if (won) state.scores[p.name] = (state.scores[p.name] || 0) + POINTS[p.role];
+    const st = (state.stats[p.name] ||= emptyStats());
+    st.games++;
+    st[p.role][0]++;
+    if (won) { st.wins++; st[p.role][1]++; }
+    if (p.alive) st.survived++;
+    if (g.elimOrder[0] === p.name) st.firstOut++;
+    if (p.role === 'white' && g.whiteGuessed && g.eliminated === p.name) st.guessed++;
   }
   state.screen = 'end';
 }
@@ -200,6 +259,7 @@ function eliminate(name) {
   const p = g.players.find((x) => x.name === name);
   p.alive = false;
   g.eliminated = name;
+  (g.elimOrder ||= []).push(name);
   g.whiteGuess = null;
   state.screen = p.role === 'white' ? 'whiteGuess' : 'reveal';
 }
@@ -303,10 +363,25 @@ const ICONS = {
 const icon = (name) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
 const pad = (n) => String(n).padStart(2, '0');
 const roleClass = (r) => `c-${r}`;
-const backLink = () => `<button class="link back" data-action="go" data-screen="home">${icon('back')} Retour</button>`;
+const backLink = (screen = 'home', label = 'Retour') => `<button class="link back" data-action="go" data-screen="${screen}">${icon('back')} ${label}</button>`;
+const APP_URL = new URL('./', location.href).href;
+
+function initials(name) {
+  const words = name.trim().split(/\s+/);
+  return (words.length > 1 ? words[0][0] + words[1][0] : name.slice(0, 2)).toUpperCase();
+}
+
+function avatar(name, cls = '') {
+  const src = photos[name];
+  return src
+    ? `<img class="ava ${cls}" src="${src}" alt="">`
+    : `<span class="ava initials ${cls}" aria-hidden="true">${esc(initials(name))}</span>`;
+}
+
+const percent = (won, played) => (played ? `${Math.round((100 * won) / played)} %` : '–');
 
 function render() {
-  const screens = { home, pairs: pairsScreen, scores, deal, game, whiteGuess, reveal, end };
+  const screens = { home, pairs: pairsScreen, trash, agents, scores: agents, profile, deal, game, whiteGuess, reveal, end };
   // Conserve la saisie en cours si la liste partagée se met à jour pendant qu'on tape.
   const typed = [...app.querySelectorAll('input[name], select[name]')].map((i) => [i.closest('form')?.dataset.form, i.name, i.value]);
   const focused = document.activeElement?.name;
@@ -377,7 +452,8 @@ function home() {
         ${state.players.map((p, i) => `
           <li>
             <span class="n">${pad(i + 1)}</span>
-            <span class="name">${esc(p)}</span>
+            <button class="who-btn" data-action="openProfile" data-name="${esc(p)}" aria-label="Fiche de ${esc(p)}">
+              ${avatar(p, 'sm')}<span class="name">${esc(p)}</span></button>
             <button class="icon-btn" data-action="moveUp" data-i="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Monter ${esc(p)}">${icon('up')}</button>
             <button class="icon-btn" data-action="removePlayer" data-i="${i}" aria-label="Retirer ${esc(p)}">${icon('close')}</button>
           </li>`).join('')}
@@ -420,8 +496,9 @@ function home() {
     </section>
 
     <div class="links">
-      <button class="link" data-action="go" data-screen="pairs">Gérer les paires</button>
-      <button class="link" data-action="go" data-screen="scores">Scores</button>
+      <button class="link" data-action="go" data-screen="pairs">Les paires</button>
+      <button class="link" data-action="go" data-screen="agents">Agents</button>
+      <button class="link" data-action="openInvite">Inviter</button>
     </div>
 
     <div class="dock">
@@ -450,10 +527,12 @@ function pairsScreen() {
   const online = cloudStatus === 'online';
   return `
     ${backLink()}
-    <div class="screen-head"><h2 class="display">Les paires</h2><span class="label">${allPairs().length} au total</span></div>
-    <p class="muted">${online
-      ? 'Connecté : ajouts et suppressions sont visibles par tout le monde.'
-      : 'Hors ligne : tu peux ajouter des paires (envoyées au retour d\'internet), mais pas en supprimer.'}</p>
+    <div class="screen-head"><h2 class="display">Les paires</h2>
+      <button class="link" data-action="openTrash">Corbeille</button></div>
+    <p class="muted">${allPairs().length} paires. ${online
+      ? 'Ajouts et suppressions sont visibles par tout le monde.'
+      : 'Hors ligne : tu peux ajouter des paires (envoyées au retour d\'internet), mais pas en supprimer.'}
+      Les paires notées ${BANNED_SCORE} ou moins ne sont plus tirées.</p>
     ${ui.addOpen ? `
       <form class="form-card adder" data-form="addPair">
         <label class="field"><span class="label">Mot 1</span>
@@ -496,6 +575,8 @@ function pairsList() {
           <div class="tr">
             <span class="strong fill">${esc(p.a)} <span class="slash">/</span> ${esc(p.b)}</span>
             ${p.pending ? '<span class="mini-stamp c-under">En attente</span>' : ''}
+            ${netScore(p) <= BANNED_SCORE ? '<span class="mini-stamp c-under">Écartée</span>' : ''}
+            ${p.up || p.down ? `<span class="score ${netScore(p) > 0 ? 'pos' : netScore(p) < 0 ? 'neg' : ''}" title="${p.up || 0} pour, ${p.down || 0} contre">${netScore(p) > 0 ? '+' : ''}${netScore(p)}</span>` : ''}
             <button class="icon-btn" data-action="removePair" data-id="${esc(p.id)}" aria-label="Supprimer ${esc(p.a)} / ${esc(p.b)}">${icon('close')}</button>
           </div>`).join('')}
       </div>
@@ -515,30 +596,141 @@ function pairExists(a, b) {
   return allPairs().some((p) => key(p.a, p.b) === k);
 }
 
-function scores() {
-  const rows = Object.entries(state.scores).sort((a, b) => b[1] - a[1]);
+function trash() {
+  let content;
+  if (ui.trash === 'offline') content = '<p class="empty">Il faut internet pour voir la corbeille.</p>';
+  else if (ui.trash === 'error') content = '<p class="empty">Impossible de charger la corbeille.</p>';
+  else if (!ui.trash) content = '<p class="empty">Chargement…</p>';
+  else if (!ui.trash.length) content = '<p class="empty">La corbeille est vide.</p>';
+  else {
+    content = `<div class="table">
+      ${ui.trash.map((t) => {
+        const d = new Date(t.deletedAt);
+        return `
+          <div class="tr">
+            <div><div class="strong">${esc(t.a)} <span class="slash">/</span> ${esc(t.b)}</div>
+              <div class="sub">${esc(t.cat)} · supprimée le ${d.toLocaleDateString('fr-FR')} à ${d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}</div></div>
+            <button class="link" data-action="restore" data-id="${esc(t.id)}">Restaurer</button>
+          </div>`;
+      }).join('')}
+    </div>`;
+  }
+  return `
+    ${backLink('pairs', 'Les paires')}
+    <div class="screen-head"><h2 class="display">Corbeille</h2></div>
+    <p class="muted">Les 100 dernières paires supprimées. « Restaurer » la remet dans la base pour tout le monde, avec ses notes.</p>
+    ${content}
+  `;
+}
+
+function loadTrash() {
+  if (cloudStatus !== 'online') { ui.trash = 'offline'; return; }
+  ui.trash = null;
+  window.cloud.listTrash()
+    .then((list) => { ui.trash = list; })
+    .catch(() => { ui.trash = 'error'; })
+    .finally(() => { if (state.screen === 'trash') render(); });
+}
+
+function agentNames() {
+  return [...new Set([...state.players, ...Object.keys(state.scores), ...Object.keys(state.stats)])];
+}
+
+function agents() {
+  const rows = agentNames()
+    .map((name) => ({ name, pts: state.scores[name] || 0, st: state.stats[name] || emptyStats() }))
+    .sort((x, y) => y.pts - x.pts || y.st.wins - x.st.wins || collator.compare(x.name, y.name));
   return `
     ${backLink()}
-    <div class="screen-head"><h2 class="display">Scores</h2></div>
-    <p class="muted">Victoire : civil ${POINTS.civil} pts · Mr. White ${POINTS.white} pts · Undercover ${POINTS.under} pts</p>
+    <div class="screen-head"><h2 class="display">Agents</h2></div>
+    <p class="muted">Victoire : civil ${POINTS.civil} pts · Mr. White ${POINTS.white} pts · Undercover ${POINTS.under} pts. Touche un agent pour voir sa fiche.</p>
     ${rows.length ? `<div class="table">
-      ${rows.map(([name, pts], i) => `
-        <div class="tr">
+      ${rows.map(({ name, pts, st }, i) => `
+        <button class="tr agent-row" data-action="openProfile" data-name="${esc(name)}">
           <span class="rank">${pad(i + 1)}</span>
-          <span class="strong fill">${esc(name)}</span>
+          ${avatar(name, 'sm')}
+          <span class="fill"><span class="strong">${esc(name)}</span>
+            <span class="sub">${st.wins} victoire${st.wins > 1 ? 's' : ''} · ${st.games} partie${st.games > 1 ? 's' : ''}</span></span>
           <span class="pts">${pts}</span>
-        </div>`).join('')}
+        </button>`).join('')}
     </div>
-    <button class="link red" data-action="resetScores">Remettre les scores à zéro</button>`
-    : '<p class="empty">Pas encore de score. Joue une partie.</p>'}
+    <button class="link red" data-action="resetScores">Remettre les points à zéro</button>`
+    : '<p class="empty">Aucun agent pour l\'instant. Ajoute des joueurs sur l\'accueil.</p>'}
   `;
+}
+
+function profile() {
+  const name = ui.profile;
+  if (!name) return agents();
+  const st = state.stats[name] || emptyStats();
+  const pts = state.scores[name] || 0;
+  const role = (key, label) => `
+    <div class="tr">
+      <span class="strong fill ${roleClass(key)}">${label}</span>
+      <span class="sub">${st[key][1]} / ${st[key][0]} gagnée${st[key][1] > 1 ? 's' : ''}</span>
+      <span class="pts small">${percent(st[key][1], st[key][0])}</span>
+    </div>`;
+  return `
+    ${backLink('agents', 'Agents')}
+    <div class="id-card">
+      <div class="id-photo">${avatar(name, 'xl')}</div>
+      <div class="id-info">
+        <span class="label">Fiche agent</span>
+        <h2 class="display">${esc(name)}</h2>
+        <label class="link photo-btn">${photos[name] ? 'Changer la photo' : 'Ajouter une photo'}
+          <input type="file" accept="image/*" data-photo="${esc(name)}" hidden></label>
+        ${photos[name] ? `<button class="link red" data-action="removePhoto" data-name="${esc(name)}">Retirer la photo</button>` : ''}
+      </div>
+    </div>
+    <div class="stat-grid">
+      <div><span class="big">${st.games}</span><span class="label">Parties</span></div>
+      <div><span class="big">${st.wins}</span><span class="label">Victoires</span></div>
+      <div><span class="big">${percent(st.wins, st.games)}</span><span class="label">Réussite</span></div>
+      <div><span class="big">${pts}</span><span class="label">Points</span></div>
+    </div>
+    <section class="section">
+      <div class="section-head"><span class="label">Par rôle</span></div>
+      <div class="table">${role('civil', 'Civil')}${role('under', 'Undercover')}${role('white', 'Mr. White')}</div>
+    </section>
+    <section class="section">
+      <div class="section-head"><span class="label">Faits marquants</span></div>
+      <div class="table">
+        <div class="tr"><span class="fill">Éliminé en premier</span><span class="pts small">${st.firstOut}</span></div>
+        <div class="tr"><span class="fill">Encore en jeu à la fin</span><span class="pts small">${st.survived}</span></div>
+        <div class="tr"><span class="fill">Mot deviné en Mr. White</span><span class="pts small">${st.guessed}</span></div>
+      </div>
+    </section>
+    ${st.games ? `<button class="link red" data-action="resetStats" data-name="${esc(name)}">Effacer les stats de ${esc(name)}</button>` : ''}
+  `;
+}
+
+// Photo : recadrée en carré et réduite pour tenir dans le stockage du téléphone.
+function setPhoto(name, file) {
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    const size = 192, side = Math.min(img.naturalWidth, img.naturalHeight);
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = size;
+    canvas.getContext('2d').drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
+    URL.revokeObjectURL(url);
+    const previous = photos[name];
+    photos[name] = canvas.toDataURL('image/jpeg', 0.8);
+    if (!savePhotos()) {
+      if (previous) photos[name] = previous; else delete photos[name];
+      toast('Plus de place pour les photos sur ce téléphone.');
+    }
+    render();
+  };
+  img.onerror = () => { URL.revokeObjectURL(url); toast('Impossible de lire cette image.'); };
+  img.src = url;
 }
 
 function wordCard(p, index) {
   return `
     <div class="dossier">
       <div class="top"><span class="label">Agent ${pad(index + 1)}</span><span class="label">Usage strictement personnel</span></div>
-      <div class="who-big">${esc(p.name)}</div>
+      <div class="who-row">${avatar(p.name, 'md')}<div class="who-big">${esc(p.name)}</div></div>
       <div class="body">
         <span class="label">Ton mot</span>
         ${p.role === 'white'
@@ -565,6 +757,7 @@ function deal() {
     <div class="files">
       ${g.players.map((p, i) => `
         <button class="file ${p.seen ? 'done' : ''}" data-action="showWord" data-i="${i}" ${p.seen ? 'disabled' : ''}>
+          ${avatar(p.name, 'file-ava')}
           <span class="label">Agent ${pad(i + 1)}</span>
           <span class="fname">${esc(p.name)}</span>
           ${p.seen ? '<span class="mini-stamp c-white">Vu</span>' : ''}
@@ -591,8 +784,10 @@ function game() {
     <div class="files">
       ${g.players.map((p, i) => p.alive
         ? `<button class="file" data-action="askEliminate" data-name="${esc(p.name)}">
+             ${avatar(p.name, 'file-ava')}
              <span class="label">Agent ${pad(i + 1)}</span><span class="fname">${esc(p.name)}</span></button>`
         : `<div class="file dead">
+             ${avatar(p.name, 'file-ava')}
              <span class="label">Éliminé</span><span class="fname">${esc(p.name)}</span>
              <span class="mini-stamp ${roleClass(p.role)}">${ROLE_LABEL[p.role]}</span></div>`).join('')}
     </div>
@@ -625,9 +820,10 @@ function timerBlock() {
     </div>`;
 }
 
-function verdict(label, who, stampText, role) {
+function verdict(label, who, stampText, role, face = '') {
   return `
     <div class="verdict">
+      ${face}
       <span class="label">${label}</span>
       ${who ? `<div class="who">${who}</div>` : ''}
       <span class="stamp ${roleClass(role)}">${stampText}</span>
@@ -638,7 +834,7 @@ function reveal() {
   const g = state.game;
   const p = g.players.find((x) => x.name === g.eliminated);
   return `
-    ${verdict('Agent éliminé', esc(p.name), ROLE_LABEL[p.role], p.role)}
+    ${verdict('Agent éliminé', esc(p.name), ROLE_LABEL[p.role], p.role, avatar(p.name, 'lg'))}
     ${g.whiteGuess ? `<p class="center muted">A proposé « ${esc(g.whiteGuess)} » : raté.</p>` : ''}
     <button class="btn" data-action="continue">Continuer</button>
   `;
@@ -647,7 +843,7 @@ function reveal() {
 function whiteGuess() {
   const g = state.game;
   return `
-    ${verdict('Agent éliminé', esc(g.eliminated), 'Mr. White', 'white')}
+    ${verdict('Agent éliminé', esc(g.eliminated), 'Mr. White', 'white', avatar(g.eliminated, 'lg'))}
     <p>Dernière chance : s'il devine le mot des civils, Mr. White gagne la partie.</p>
     <form class="form-card" data-form="whiteGuess">
       <label class="field"><span class="label">Le mot des civils</span>
@@ -682,15 +878,25 @@ function end() {
     <div class="table">
       ${g.players.map((p) => `
         <div class="tr">
-          <span class="strong ${p.alive ? '' : 'dead'}">${esc(p.name)}</span>
+          <span class="fill agent-cell">${avatar(p.name, 'sm')}<span class="strong ${p.alive ? '' : 'dead'}">${esc(p.name)}</span></span>
           <span class="mini-stamp ${roleClass(p.role)}">${ROLE_LABEL[p.role]}</span>
           <span class="pts" style="min-width:44px;text-align:right">${w.includes(p.role) ? `+${POINTS[p.role]}` : ''}</span>
         </div>`).join('')}
     </div>
+    ${g.pairId ? `
+      <div class="rate">
+        <span class="label">Cette paire était…</span>
+        ${state.rated[g.pairId]
+          ? `<p class="sub">Note enregistrée : ${state.rated[g.pairId] > 0 ? 'bonne paire' : 'paire nulle'}. Merci.</p>`
+          : `<div class="row2">
+              <button class="btn outline" data-action="rate" data-v="1">Bonne</button>
+              <button class="btn outline" data-action="rate" data-v="-1">Nulle</button>
+            </div>`}
+      </div>` : ''}
     <button class="btn" data-action="replay">Rejouer</button>
     <div class="links">
       <button class="link" data-action="toHome">Menu</button>
-      <button class="link" data-action="go" data-screen="scores">Scores</button>
+      <button class="link" data-action="go" data-screen="agents">Agents</button>
     </div>
   `;
 }
@@ -706,6 +912,19 @@ function overlay() {
         <button class="btn red" data-action="confirmOverlay">Confirmer</button>
       </div></div></div>`;
   }
+  if (ui.overlay.type === 'invite') {
+    return `<div class="overlay"><div class="sheet" role="dialog" aria-modal="true">
+      <h3>Inviter un agent</h3>
+      <div class="qr">${qrSvg(APP_URL)}</div>
+      <p class="center sub url">${esc(APP_URL)}</p>
+      <div class="row2">
+        <button class="btn outline" data-action="copyLink">Copier</button>
+        ${navigator.share ? '<button class="btn" data-action="shareLink">Partager</button>' : ''}
+      </div>
+      <p class="sub">iPhone : ouvrir dans Safari, Partager, « Sur l'écran d'accueil ».<br>Android : Chrome, menu, « Installer l'application ».</p>
+      <button class="link center" data-action="closeOverlay">Fermer</button>
+    </div></div>`;
+  }
   if (ui.overlay.type === 'peek') {
     if (ui.peek !== null) {
       return `<div class="overlay"><div class="sheet" role="dialog" aria-modal="true" style="min-height:70vh">
@@ -719,6 +938,18 @@ function overlay() {
       <button class="link center" data-action="closeOverlay">Annuler</button></div></div>`;
   }
   return '';
+}
+
+function qrSvg(text) {
+  if (typeof qrcode !== 'function') return '';
+  const qr = qrcode(0, 'M');
+  qr.addData(text);
+  qr.make();
+  const n = qr.getModuleCount();
+  let d = '';
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) if (qr.isDark(y, x)) d += `M${x} ${y}h1v1h-1z`;
+  return `<svg viewBox="-3 -3 ${n + 6} ${n + 6}" shape-rendering="crispEdges" role="img" aria-label="QR code du lien de l'appli">
+    <rect x="-3" y="-3" width="${n + 6}" height="${n + 6}" fill="#f4eedf"/><path d="${d}" fill="#1d1b17"/></svg>`;
 }
 
 // ---------- Events ----------
@@ -749,10 +980,32 @@ const actions = {
     } else if (cloudStatus !== 'online') {
       toast('Il faut être connecté pour supprimer une paire.');
     } else {
-      confirm(`Supprimer « ${p.a} / ${p.b} » pour tout le monde ?`, () => window.cloud.remove(p.id));
+      confirm(`Supprimer « ${p.a} / ${p.b} » pour tout le monde ?`, () => window.cloud.remove(p));
     }
   },
-  resetScores: () => confirm('Remettre tous les scores à zéro ?', () => { state.scores = {}; }),
+  resetScores: () => confirm('Remettre les points de tout le monde à zéro ?', () => { state.scores = {}; }),
+  openProfile: (d) => { ui.profile = d.name; state.screen = 'profile'; },
+  removePhoto: (d) => { delete photos[d.name]; savePhotos(); },
+  resetStats: (d) => confirm(`Effacer les stats et les points de ${d.name} ?`, () => { delete state.stats[d.name]; delete state.scores[d.name]; }),
+  rate: (d) => ratePair(state.game.pairId, +d.v),
+  openTrash: () => { state.screen = 'trash'; loadTrash(); },
+  restore: (d) => {
+    const t = ui.trash.find((x) => x.id === d.id);
+    if (!t) return;
+    if (cloudStatus !== 'online') return toast('Il faut être connecté pour restaurer une paire.');
+    if (pairExists(t.a, t.b)) return toast('Cette paire est déjà dans la base.');
+    window.cloud.restore(t)
+      .then(() => { ui.trash = ui.trash.filter((x) => x.id !== t.id); toast(`« ${t.a} / ${t.b} » restaurée.`); })
+      .catch(() => toast('Restauration impossible.'))
+      .finally(() => { if (state.screen === 'trash') render(); });
+  },
+  openInvite: () => { ui.overlay = { type: 'invite' }; },
+  copyLink: () => {
+    navigator.clipboard?.writeText(APP_URL).then(() => toast('Lien copié.'), () => toast(APP_URL));
+  },
+  shareLink: () => {
+    navigator.share({ title: 'Undercover', text: 'Rejoins la partie d\'Undercover', url: APP_URL }).catch(() => {});
+  },
   start: () => { if (canStart()) startGame(); },
   showWord: (d) => { state.game.dealIndex = +d.i; },
   hideWord: () => { const g = state.game; g.players[g.dealIndex].seen = true; g.dealIndex = null; },
@@ -768,7 +1021,7 @@ const actions = {
   peek: (d) => { ui.peek = +d.i; },
   askEliminate: (d) => confirm(`Éliminer ${d.name} ?`, () => eliminate(d.name)),
   continue: afterReveal,
-  whiteAccept: () => endGame(['white']),
+  whiteAccept: () => { state.game.whiteGuessed = true; endGame(['white']); },
   whiteReject: () => { state.screen = 'reveal'; },
   replay: () => { if (canStart()) startGame(); else state.screen = 'home'; },
   toHome: () => { state.game = null; state.screen = 'home'; },
@@ -804,7 +1057,7 @@ const forms = {
     const guess = f.elements.guess.value.trim();
     if (!guess) return false;
     const g = state.game;
-    if (normalize(guess) === normalize(g.civilWord)) return endGame(['white']);
+    if (normalize(guess) === normalize(g.civilWord)) { g.whiteGuessed = true; return endGame(['white']); }
     g.whiteGuess = guess;
   },
 };
@@ -839,6 +1092,10 @@ app.addEventListener('input', (e) => {
 });
 
 app.addEventListener('change', (e) => {
+  if (e.target.dataset.photo && e.target.files?.[0]) {
+    setPhoto(e.target.dataset.photo, e.target.files[0]);
+    return;
+  }
   if (e.target.name === 'cat') {
     syncNewCat();
     if (e.target.value === NEW_CAT) app.querySelector('input[name="newCat"]').focus();

@@ -25,12 +25,12 @@ jobs:
           node-version: 20
 
       - name: Vérifier la syntaxe JavaScript
-        run: for f in app.js cloud.js firebase-config.js sw.js; do node --check "$f"; done
+        run: for f in app.js cloud.js firebase-config.js sw.js lib/qrcode.js; do node --check "$f"; done
 
       - name: Préparer le site
         run: |
           mkdir _site
-          cp -r index.html style.css app.js cloud.js firebase-config.js sw.js manifest.json icons fonts _site/
+          cp -r index.html style.css app.js cloud.js firebase-config.js sw.js manifest.json icons fonts lib _site/
           # Nouvelle version de cache à chaque déploiement : les téléphones récupèrent la mise à jour.
           sed -i "s/const CACHE = 'undercover-[^']*'/const CACHE = 'undercover-${GITHUB_SHA::8}'/" _site/sw.js
           grep -q "undercover-${GITHUB_SHA::8}" _site/sw.js

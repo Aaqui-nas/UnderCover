@@ -1,5 +1,5 @@
 // Synchronisation des paires de mots avec Firestore.
-// Expose window.cloud = { uid, add, remove } et prévient app.js via
+// Expose window.cloud = { uid, add, remove, rate, listTrash, restore } et prévient app.js via
 // window.onPairs(pairs) (liste complète confirmée par le serveur) et
 // window.onCloudStatus(status).
 const SDK = 'https://www.gstatic.com/firebasejs/10.12.2';
@@ -47,11 +47,38 @@ async function start() {
         createdAt: fs.serverTimestamp(),
       });
     },
-    remove(id) {
-      return fs.deleteDoc(fs.doc(db, 'pairs', id)).catch((err) => {
+    // Suppression : la paire part dans la corbeille partagée (restaurable).
+    remove(p) {
+      const batch = fs.writeBatch(db);
+      batch.set(fs.doc(fs.collection(db, 'trash')), {
+        a: p.a, b: p.b, cat: p.cat || 'Divers', up: p.up || 0, down: p.down || 0,
+        pairId: p.id, deletedAt: fs.serverTimestamp(),
+      });
+      batch.delete(fs.doc(db, 'pairs', p.id));
+      return batch.commit().catch((err) => {
         console.error(err);
         window.toast?.('Suppression impossible.');
       });
+    },
+    rate(id, vote) {
+      return fs.updateDoc(fs.doc(db, 'pairs', id), { [vote > 0 ? 'up' : 'down']: fs.increment(1) });
+    },
+    async listTrash() {
+      const q = fs.query(fs.collection(db, 'trash'), fs.orderBy('deletedAt', 'desc'), fs.limit(100));
+      const snap = await fs.getDocs(q);
+      return snap.docs.map((d) => {
+        const { a, b, cat, up, down, pairId, deletedAt } = d.data();
+        return { id: d.id, a, b, cat, up, down, pairId, deletedAt: deletedAt?.toMillis?.() || 0 };
+      });
+    },
+    restore(t) {
+      const batch = fs.writeBatch(db);
+      batch.set(fs.doc(db, 'pairs', t.pairId), {
+        a: t.a, b: t.b, cat: t.cat, up: t.up || 0, down: t.down || 0,
+        by: user.uid, createdAt: fs.serverTimestamp(),
+      });
+      batch.delete(fs.doc(db, 'trash', t.id));
+      return batch.commit();
     },
   };
 
@@ -61,8 +88,8 @@ async function start() {
     const pairs = snap.docs
       .filter((d) => !d.metadata.hasPendingWrites)
       .map((d) => {
-        const { a, b, cat, by } = d.data();
-        return { id: d.id, a, b, cat, by };
+        const { a, b, cat, by, up, down } = d.data();
+        return { id: d.id, a, b, cat, by, up: up || 0, down: down || 0 };
       });
     setStatus('online');
     window.onPairs?.(pairs);

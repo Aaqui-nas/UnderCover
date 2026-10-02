@@ -38,7 +38,17 @@ Fonctionnement :
 - « Gérer les paires » : toutes les paires de la base par catégorie, avec recherche. Chacun peut en ajouter
   (deux mots + une catégorie existante ou nouvelle) et en supprimer. Hors-ligne, une paire ajoutée est mise en
   attente, jouable tout de suite, et envoyée au prochain lancement avec internet ; la suppression demande internet.
-- Les paires se gèrent aussi dans la console Firebase (Firestore → collection `pairs` ; champs `a`, `b`, `cat`).
+- Une paire supprimée part dans la **corbeille** (« Les paires » → « Corbeille ») : on peut la restaurer, notes comprises.
+- **Notes** : à la fin de chaque partie, « Bonne » ou « Nulle ». Les paires bien notées sortent plus souvent ; à -3 ou
+  moins, elles ne sont plus tirées (toujours visibles et supprimables dans la liste).
+- Les paires se gèrent aussi dans la console Firebase (Firestore → collections `pairs` et `trash`).
+
+## Agents
+« Agents » sur l'accueil : classement aux points, et une fiche par joueur (photo, parties, victoires par rôle,
+éliminé en premier, etc.). Photos et stats sont gardées sur le téléphone qui sert à jouer.
+
+## Inviter
+« Inviter » affiche un QR code du lien de l'appli, avec boutons Copier et Partager.
 
 ## Chrono de discussion
 Réglé sur l'accueil avant la partie : sans, 1, 2, 3 ou 5 minutes par tour. Il démarre à chaque tour (pause et relance
