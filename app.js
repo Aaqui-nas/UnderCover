@@ -58,7 +58,7 @@ function sendPair(p) {
     .catch((err) => {
       // Refusée par les règles (paire invalide ou déjà envoyée) : inutile de réessayer.
       if (err?.code !== 'permission-denied') return;
-      if (!pairsCache.pairs.some((x) => x.id === p.id)) alert(`Paire « ${p.a} / ${p.b} » refusée par le serveur.`);
+      if (!pairsCache.pairs.some((x) => x.id === p.id)) toast(`Paire « ${p.a} / ${p.b} » refusée par le serveur.`);
       state.pendingPairs = state.pendingPairs.filter((x) => x.id !== p.id);
       if (['home', 'custom'].includes(state.screen)) render(); else save();
     })
@@ -155,6 +155,7 @@ function startGame() {
     whiteGuess: null,
     winner: null,
   };
+  state.caseNo = (state.caseNo || 0) + 1;
   state.screen = 'deal';
 }
 
@@ -210,6 +211,18 @@ function afterReveal() {
 
 // ---------- Rendering ----------
 
+const ICONS = {
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  minus: '<path d="M5 12h14"/>',
+  close: '<path d="M6 6l12 12M18 6L6 18"/>',
+  up: '<path d="M6 15l6-6 6 6"/>',
+  back: '<path d="M20 12H5M11 6l-6 6 6 6"/>',
+};
+const icon = (name) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
+const pad = (n) => String(n).padStart(2, '0');
+const roleClass = (r) => `c-${r}`;
+const backLink = () => `<button class="link back" data-action="go" data-screen="home">${icon('back')} Retour</button>`;
+
 function render() {
   const screens = { home, custom, scores, deal, game, whiteGuess, reveal, end };
   // Conserve la saisie en cours si la liste partagée se met à jour pendant qu'on tape.
@@ -227,87 +240,116 @@ function render() {
   if (input && !('ontouchstart' in window)) input.focus();
 }
 
+function toast(message) {
+  document.querySelector('.toast')?.remove();
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.setAttribute('role', 'status');
+  el.textContent = message;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3200);
+}
+window.toast = toast;
+
+function syncLabel() {
+  if (cloudStatus === 'online') return 'En ligne · à jour';
+  if (cloudStatus === 'connecting') return 'Connexion…';
+  if (!pairsCache.syncedAt) return 'Jamais synchronisé';
+  const d = new Date(pairsCache.syncedAt);
+  return `Hors ligne · ${d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' })}`;
+}
+
 function home() {
   const { n, civil } = limits();
   const cats = allCategories();
   const poolSize = pairPool().length;
   let warning = '';
-  if (n < 3) warning = 'Il faut au moins 3 joueurs.';
+  if (n < 3) warning = 'Il faut au moins 3 agents.';
   else if (state.undercover + state.white < 1) warning = 'Il faut au moins un Undercover ou un Mr. White.';
-  else if (civil < 2 || state.undercover + state.white > civil) warning = 'Trop d\'imposteurs pour le nombre de joueurs.';
-  else if (!pairsCache.pairs.length && !state.pendingPairs.length) warning = 'Aucun mot sur ce téléphone : lance l\'appli une première fois avec internet pour les télécharger.';
-  else if (!poolSize) warning = 'Sélectionne au moins une catégorie.';
+  else if (civil < 2 || state.undercover + state.white > civil) warning = 'Trop d\'imposteurs pour le nombre d\'agents.';
+  else if (!pairsCache.pairs.length && !state.pendingPairs.length) warning = 'Aucun mot sur ce téléphone. Lance l\'appli une première fois avec internet pour les télécharger.';
+  else if (!poolSize) warning = 'Coche au moins une catégorie.';
+  const statusCls = cloudStatus === 'online' ? 'online' : pairsCache.syncedAt && cloudStatus !== 'connecting' ? 'offline' : '';
 
   return `
-    <h1>Under<span>cover</span></h1>
-    <div class="card">
-      <div class="row between"><h2>Joueurs (${n})</h2>
-        ${n ? '<button class="ghost small" data-action="shufflePlayers">🔀 Mélanger</button>' : ''}
+    <header class="masthead">
+      <div class="meta">
+        <span class="label">N° ${String((state.caseNo || 0) + 1).padStart(3, '0')}</span>
+        <span class="label status ${statusCls}">${syncLabel()}</span>
       </div>
-      <form class="row" data-form="addPlayer">
-        <input type="text" name="name" placeholder="Nom du joueur" maxlength="20" autocomplete="off" enterkeyhint="done">
-        <button class="round" type="submit">+</button>
+      <h1 class="display">Undercover</h1>
+      <div class="rules"></div>
+    </header>
+
+    <section class="section">
+      <div class="section-head">
+        <span class="label"><span class="num">01</span>Agents · ${n}</span>
+        ${n > 1 ? '<button class="link" data-action="shufflePlayers">Mélanger</button>' : ''}
+      </div>
+      <form class="inline-form" data-form="addPlayer">
+        <input type="text" name="name" placeholder="Nom de l'agent" maxlength="20" autocomplete="off" enterkeyhint="done">
+        <button class="icon-btn solid" type="submit" aria-label="Ajouter l'agent">${icon('plus')}</button>
       </form>
-      <div class="players">
+      ${n ? `<ol class="roster">
         ${state.players.map((p, i) => `
-          <div class="player">
+          <li>
+            <span class="n">${pad(i + 1)}</span>
             <span class="name">${esc(p)}</span>
-            <button class="ghost small" data-action="moveUp" data-i="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
-            <button class="ghost small" data-action="removePlayer" data-i="${i}">✕</button>
-          </div>`).join('')}
-      </div>
-    </div>
+            <button class="icon-btn" data-action="moveUp" data-i="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Monter ${esc(p)}">${icon('up')}</button>
+            <button class="icon-btn" data-action="removePlayer" data-i="${i}" aria-label="Retirer ${esc(p)}">${icon('close')}</button>
+          </li>`).join('')}
+      </ol>` : '<p class="empty">Ajoute au moins 3 agents.</p>'}
+    </section>
 
-    <div class="card">
-      <h2>Rôles</h2>
-      <div class="row between">
-        <span><span class="role-civil">●</span> Civils</span>
-        <span class="stepper"><span class="val">${Math.max(civil, 0)}</span></span>
+    <section class="section">
+      <div class="section-head"><span class="label"><span class="num">02</span>Rôles</span></div>
+      <div class="roles">
+        <div class="role civil">
+          <span class="count">${Math.max(civil, 0)}</span>
+          <span class="label">Civils</span>
+          <span class="fixed">le reste</span>
+        </div>
+        ${roleColumn('Undercover', 'under', 'undercover')}
+        ${roleColumn('Mr. White', 'white', 'white')}
       </div>
-      ${stepper('Undercover', 'role-under', 'undercover', state.undercover)}
-      ${stepper('Mr. White', 'role-white', 'white', state.white)}
-    </div>
+    </section>
 
-    <div class="card">
-      <div class="row between"><h2>Catégories</h2>
-        <button class="ghost small" data-action="toggleAllCats">Tout / rien</button>
+    <section class="section">
+      <div class="section-head">
+        <span class="label"><span class="num">03</span>Catégories · ${poolSize} paires</span>
+        ${Object.keys(cats).length ? `<button class="link" data-action="toggleAllCats">${state.disabledCats.length ? 'Tout cocher' : 'Tout décocher'}</button>` : ''}
       </div>
-      <div class="chips">
+      ${Object.keys(cats).length ? `<div class="cats">
         ${Object.keys(cats).map((c) => `
-          <button class="chip ${state.disabledCats.includes(c) ? '' : 'on'}" data-action="toggleCat" data-cat="${esc(c)}">${esc(c)} · ${cats[c].length}</button>`).join('')
-          || `<p class="muted">${cloudStatus === 'connecting' ? 'Téléchargement des mots…' : 'Aucune catégorie.'}</p>`}
-      </div>
-      <p class="muted">${poolSize} paires sélectionnées · ${syncLabel()}</p>
+          <button class="cat ${state.disabledCats.includes(c) ? '' : 'on'}" data-action="toggleCat" data-cat="${esc(c)}" aria-pressed="${!state.disabledCats.includes(c)}">
+            <span class="box"></span><span class="cname">${esc(c)}</span><span class="ccount">${cats[c].length}</span>
+          </button>`).join('')}
+      </div>` : `<p class="empty">${cloudStatus === 'connecting' ? 'Téléchargement des mots…' : 'Aucune catégorie pour l\'instant.'}</p>`}
+    </section>
+
+    <div class="links">
+      <button class="link" data-action="go" data-screen="custom">Ajouter une paire</button>
+      <button class="link" data-action="go" data-screen="scores">Scores</button>
     </div>
 
-    <div class="row">
-      <button class="grow" data-action="go" data-screen="custom">✏️ Ajouter une paire</button>
-      <button class="grow" data-action="go" data-screen="scores">🏆 Scores</button>
+    <div class="dock">
+      ${warning ? `<p class="notice">${warning}</p>` : ''}
+      <button class="btn" data-action="start" ${canStart() ? '' : 'disabled'}>Lancer la partie</button>
     </div>
-
-    ${warning ? `<p class="center" style="color:var(--warn)">${warning}</p>` : ''}
-    <button class="primary" data-action="start" ${canStart() ? '' : 'disabled'}>Lancer la partie</button>
   `;
 }
 
-function stepper(label, cls, key, val) {
+function roleColumn(label, cls, key) {
+  const val = state[key];
   return `
-    <div class="row between">
-      <span><span class="${cls}">●</span> ${label}</span>
-      <span class="stepper">
-        <button class="round" data-action="dec" data-key="${key}" ${val <= 0 ? 'disabled' : ''}>−</button>
-        <span class="val">${val}</span>
-        <button class="round" data-action="inc" data-key="${key}">+</button>
+    <div class="role ${cls}">
+      <span class="count">${val}</span>
+      <span class="label">${label}</span>
+      <span class="ctrl">
+        <button class="icon-btn boxed" data-action="dec" data-key="${key}" ${val <= 0 ? 'disabled' : ''} aria-label="Moins de ${label}">${icon('minus')}</button>
+        <button class="icon-btn boxed" data-action="inc" data-key="${key}" aria-label="Plus de ${label}">${icon('plus')}</button>
       </span>
     </div>`;
-}
-
-function syncLabel() {
-  if (cloudStatus === 'online') return '☁️ à jour';
-  if (cloudStatus === 'connecting') return 'mise à jour…';
-  if (!pairsCache.syncedAt) return 'jamais synchronisé';
-  const d = new Date(pairsCache.syncedAt);
-  return `📴 hors-ligne, mots du ${d.toLocaleDateString('fr-FR')}`;
 }
 
 function custom() {
@@ -317,29 +359,36 @@ function custom() {
   const selected = cats.includes(state.lastCat) ? state.lastCat : cats[0];
   const online = cloudStatus === 'online';
   return `
-    <div class="row"><button class="ghost" data-action="go" data-screen="home">← Retour</button></div>
-    <h2>Ajouter une paire</h2>
+    ${backLink()}
+    <div class="screen-head"><h2 class="display">Nouvelle paire</h2></div>
     <p class="muted">${online
-      ? '☁️ Connecté : la paire sera visible par tout le monde.'
-      : '📴 Hors-ligne : la paire sera envoyée automatiquement au prochain lancement avec internet.'}</p>
-    <form class="card" data-form="addPair">
-      <input type="text" name="a" placeholder="Mot 1 (ex : Pizza)" maxlength="40" autocomplete="off">
-      <input type="text" name="b" placeholder="Mot 2 proche (ex : Quiche)" maxlength="40" autocomplete="off">
-      <label class="muted" for="cat">Catégorie</label>
-      <select name="cat" id="cat">
-        ${cats.map((c) => `<option value="${esc(c)}" ${c === selected ? 'selected' : ''}>${esc(c)}</option>`).join('')}
-        <option value="${NEW_CAT}" ${cats.length ? '' : 'selected'}>➕ Nouvelle catégorie…</option>
-      </select>
-      <input type="text" name="newCat" placeholder="Nom de la nouvelle catégorie" maxlength="30" autocomplete="off">
-      <button class="primary" type="submit">Ajouter</button>
+      ? 'Connecté : la paire sera visible par tout le monde.'
+      : 'Hors ligne : la paire sera envoyée au prochain lancement avec internet. Elle est jouable tout de suite sur ce téléphone.'}</p>
+    <form class="form-card" data-form="addPair">
+      <label class="field"><span class="label">Mot 1</span>
+        <input type="text" name="a" placeholder="Pizza" maxlength="40" autocomplete="off"></label>
+      <label class="field"><span class="label">Mot 2, proche du premier</span>
+        <input type="text" name="b" placeholder="Quiche" maxlength="40" autocomplete="off"></label>
+      <label class="field"><span class="label">Catégorie</span>
+        <select name="cat">
+          ${cats.map((c) => `<option value="${esc(c)}" ${c === selected ? 'selected' : ''}>${esc(c)}</option>`).join('')}
+          <option value="${NEW_CAT}" ${cats.length ? '' : 'selected'}>Nouvelle catégorie…</option>
+        </select></label>
+      <label class="field"><span class="label">Nom de la nouvelle catégorie</span>
+        <input type="text" name="newCat" placeholder="Soirées" maxlength="30" autocomplete="off"></label>
+      <button class="btn" type="submit">Ajouter</button>
     </form>
-    <h2>Mes paires (${mine.length})</h2>
-    <div class="list">
-      ${mine.map((p) => `
-        <div class="item"><span>${esc(p.a)} / ${esc(p.b)} <span class="muted">· ${esc(p.cat || DEFAULT_CAT)}${p.pending ? ' · en attente' : ''}</span></span>
-          <button class="ghost small" data-action="removePair" data-id="${esc(p.id)}">✕</button></div>`).join('')
-        || '<p class="muted center">Tu n\'as encore rien ajouté.</p>'}
-    </div>
+    <section class="section">
+      <div class="section-head"><span class="label">Mes paires · ${mine.length}</span></div>
+      ${mine.length ? `<div class="table">
+        ${mine.map((p) => `
+          <div class="tr">
+            <div><div class="strong">${esc(p.a)} / ${esc(p.b)}</div>
+              <div class="sub">${esc(p.cat || DEFAULT_CAT)}${p.pending ? ' · en attente d\'envoi' : ''}</div></div>
+            <button class="icon-btn" data-action="removePair" data-id="${esc(p.id)}" aria-label="Supprimer">${icon('close')}</button>
+          </div>`).join('')}
+      </div>` : '<p class="empty">Tu n\'as encore rien ajouté.</p>'}
+    </section>
   `;
 }
 
@@ -347,7 +396,7 @@ function custom() {
 function syncNewCat() {
   const select = app.querySelector('select[name="cat"]');
   const input = app.querySelector('input[name="newCat"]');
-  if (select && input) input.hidden = select.value !== NEW_CAT;
+  if (select && input) input.closest('.field').hidden = select.value !== NEW_CAT;
 }
 
 function pairExists(a, b) {
@@ -359,111 +408,124 @@ function pairExists(a, b) {
 function scores() {
   const rows = Object.entries(state.scores).sort((a, b) => b[1] - a[1]);
   return `
-    <div class="row"><button class="ghost" data-action="go" data-screen="home">← Retour</button></div>
-    <h2>🏆 Scores</h2>
-    <p class="muted">Civil gagnant : ${POINTS.civil} pts · Mr. White : ${POINTS.white} pts · Undercover : ${POINTS.under} pts</p>
-    <div class="list">
+    ${backLink()}
+    <div class="screen-head"><h2 class="display">Scores</h2></div>
+    <p class="muted">Victoire : civil ${POINTS.civil} pts · Mr. White ${POINTS.white} pts · Undercover ${POINTS.under} pts</p>
+    ${rows.length ? `<div class="table">
       ${rows.map(([name, pts], i) => `
-        <div class="item"><span>${['🥇', '🥈', '🥉'][i] || `${i + 1}.`} ${esc(name)}</span><strong>${pts}</strong></div>`).join('')
-        || '<p class="muted center">Pas encore de score.</p>'}
+        <div class="tr">
+          <span class="rank">${pad(i + 1)}</span>
+          <span class="strong fill">${esc(name)}</span>
+          <span class="pts">${pts}</span>
+        </div>`).join('')}
     </div>
-    ${rows.length ? '<button class="danger" data-action="resetScores">Remettre les scores à zéro</button>' : ''}
+    <button class="link red" data-action="resetScores">Remettre les scores à zéro</button>`
+    : '<p class="empty">Pas encore de score. Joue une partie.</p>'}
   `;
 }
 
-function wordCard(p) {
-  if (p.role === 'white') {
-    return `<div class="big-card" style="background:linear-gradient(160deg,#3a3650,#1f1c30)">
-      <div class="label">Tu es</div><div class="word">Mr. White 🤫</div>
-      <p>Tu n'as pas de mot. Écoute les autres et bluffe !</p></div>`;
-  }
-  return `<div class="big-card"><div class="label">Ton mot</div><div class="word">${esc(p.word)}</div></div>`;
+function wordCard(p, index) {
+  return `
+    <div class="dossier">
+      <div class="top"><span class="label">Agent ${pad(index + 1)}</span><span class="label">Usage strictement personnel</span></div>
+      <div class="who-big">${esc(p.name)}</div>
+      <div class="body">
+        <span class="label">Ton mot</span>
+        ${p.role === 'white'
+          ? `<div class="redacted"></div>
+             <p>Tu es <strong>Mr. White</strong>. Tu n'as pas de mot : écoute les autres et bluffe.</p>`
+          : `<div class="word">${esc(p.word)}</div>`}
+      </div>
+      <div class="stamp-corner">Top secret</div>
+    </div>`;
 }
 
 function deal() {
   const g = state.game;
   if (g.dealIndex !== null) {
-    const p = g.players[g.dealIndex];
     return `
-      <h2 class="center">${esc(p.name)}</h2>
-      ${wordCard(p)}
-      <button class="primary" data-action="hideWord">J'ai retenu, cacher</button>
+      ${wordCard(g.players[g.dealIndex], g.dealIndex)}
+      <button class="btn" data-action="hideWord">Retenu, fermer le dossier</button>
     `;
   }
-  const allSeen = g.players.every((p) => p.seen);
+  const seen = g.players.filter((p) => p.seen).length;
   return `
-    <h2>Distribution des mots</h2>
-    <p class="muted">Chacun son tour : prends le téléphone, touche ton nom, mémorise ton mot sans le montrer.</p>
-    <div class="grid">
+    <div class="screen-head"><h2 class="display">Distribution</h2><span class="label">${seen} / ${g.players.length}</span></div>
+    <p class="muted">Chacun son tour : prends le téléphone, touche ton nom et mémorise ton mot sans le montrer.</p>
+    <div class="files">
       ${g.players.map((p, i) => `
-        <button class="tile ${p.seen ? 'done' : ''}" data-action="showWord" data-i="${i}" ${p.seen ? 'disabled' : ''}>
-          ${esc(p.name)}${p.seen ? '<span class="tag">✓ vu</span>' : ''}</button>`).join('')}
+        <button class="file ${p.seen ? 'done' : ''}" data-action="showWord" data-i="${i}" ${p.seen ? 'disabled' : ''}>
+          <span class="label">Agent ${pad(i + 1)}</span>
+          <span class="fname">${esc(p.name)}</span>
+          ${p.seen ? '<span class="mini-stamp c-white">Vu</span>' : ''}
+        </button>`).join('')}
     </div>
     <div class="grow"></div>
-    <button class="primary" data-action="beginRounds" ${allSeen ? '' : 'disabled'}>Tout le monde a vu son mot</button>
-    <button class="ghost" data-action="quit">Abandonner la partie</button>
+    <button class="btn" data-action="beginRounds" ${seen === g.players.length ? '' : 'disabled'}>Commencer</button>
+    <button class="link center" data-action="quit">Abandonner la partie</button>
   `;
 }
 
 function game() {
   const g = state.game;
   return `
-    <div class="row between"><h2>Tour ${g.round}</h2>
-      <button class="ghost small" data-action="openPeek">👁 Revoir mon mot</button></div>
-    <div class="card center">
-      <p class="muted">C'est</p>
-      <h2>${esc(g.starter)}</h2>
-      <p class="muted">qui commence. Chacun donne un indice sur son mot, puis votez !</p>
+    <div class="screen-head"><h2 class="display">Tour ${pad(g.round)}</h2>
+      <button class="link" data-action="openPeek">Revoir mon mot</button></div>
+    <div class="speaker">
+      <span class="label">Premier à parler</span>
+      <span class="who">${esc(g.starter)}</span>
+      <span class="muted">Chacun donne un indice sur son mot, puis votez.</span>
     </div>
-    <p class="muted">Touchez le joueur éliminé par le vote :</p>
-    <div class="grid">
-      ${g.players.map((p) => p.alive
-        ? `<button class="tile" data-action="askEliminate" data-name="${esc(p.name)}">${esc(p.name)}</button>`
-        : `<div class="tile dead">${esc(p.name)}<span class="tag ${roleClass(p.role)}">${ROLE_LABEL[p.role]}</span></div>`).join('')}
+    <div class="section-head"><span class="label">Touchez l'agent éliminé par le vote</span></div>
+    <div class="files">
+      ${g.players.map((p, i) => p.alive
+        ? `<button class="file" data-action="askEliminate" data-name="${esc(p.name)}">
+             <span class="label">Agent ${pad(i + 1)}</span><span class="fname">${esc(p.name)}</span></button>`
+        : `<div class="file dead">
+             <span class="label">Éliminé</span><span class="fname">${esc(p.name)}</span>
+             <span class="mini-stamp ${roleClass(p.role)}">${ROLE_LABEL[p.role]}</span></div>`).join('')}
     </div>
     <div class="grow"></div>
-    <button class="ghost" data-action="quit">Abandonner la partie</button>
+    <button class="link center" data-action="quit">Abandonner la partie</button>
   `;
 }
 
-const roleClass = (r) => ({ civil: 'role-civil', under: 'role-under', white: 'role-white' }[r]);
+function verdict(label, who, stampText, role) {
+  return `
+    <div class="verdict">
+      <span class="label">${label}</span>
+      ${who ? `<div class="who">${who}</div>` : ''}
+      <span class="stamp ${roleClass(role)}">${stampText}</span>
+    </div>`;
+}
 
 function reveal() {
   const g = state.game;
   const p = g.players.find((x) => x.name === g.eliminated);
-  const emoji = { civil: '😇', under: '🕵️', white: '👻' }[p.role];
   return `
-    <div class="grow"></div>
-    <div class="banner ${p.role}">
-      <div class="emoji">${emoji}</div>
-      <h2>${esc(p.name)} était</h2>
-      <h1 class="${roleClass(p.role)}">${ROLE_LABEL[p.role]}</h1>
-      ${g.whiteGuess ? `<p class="muted">A proposé « ${esc(g.whiteGuess)} » — raté !</p>` : ''}
-    </div>
-    <div class="grow"></div>
-    <button class="primary" data-action="continue">Continuer</button>
+    ${verdict('Agent éliminé', esc(p.name), ROLE_LABEL[p.role], p.role)}
+    ${g.whiteGuess ? `<p class="center muted">A proposé « ${esc(g.whiteGuess)} » : raté.</p>` : ''}
+    <button class="btn" data-action="continue">Continuer</button>
   `;
 }
 
 function whiteGuess() {
   const g = state.game;
   return `
-    <div class="banner white">
-      <div class="emoji">👻</div>
-      <h2>${esc(g.eliminated)} était Mr. White !</h2>
-      <p>Dernière chance : devine le mot des civils pour gagner.</p>
-    </div>
-    <form class="card" data-form="whiteGuess">
-      <input type="text" name="guess" placeholder="Le mot des civils…" autocomplete="off" autofocus>
-      <button class="primary" type="submit">Valider</button>
+    ${verdict('Agent éliminé', esc(g.eliminated), 'Mr. White', 'white')}
+    <p>Dernière chance : s'il devine le mot des civils, Mr. White gagne la partie.</p>
+    <form class="form-card" data-form="whiteGuess">
+      <label class="field"><span class="label">Le mot des civils</span>
+        <input type="text" name="guess" autocomplete="off" autofocus></label>
+      <button class="btn" type="submit">Valider</button>
     </form>
     ${g.whiteGuess ? `
-      <div class="card center">
-        <p>« ${esc(g.whiteGuess)} » n'est pas exactement le mot.</p>
-        <p class="muted">Le mot était <strong>${esc(g.civilWord)}</strong>. Faute de frappe ou synonyme accepté par le groupe ?</p>
-        <div class="row">
-          <button class="grow" data-action="whiteAccept">✓ On accepte</button>
-          <button class="grow danger" data-action="whiteReject">✕ Raté</button>
+      <div class="speaker">
+        <p>« ${esc(g.whiteGuess)} » n'est pas exactement le mot. Le mot était <strong>${esc(g.civilWord)}</strong>.</p>
+        <p class="muted">Faute de frappe ou synonyme : le groupe accepte ?</p>
+        <div class="row2">
+          <button class="btn outline" data-action="whiteAccept">Accepter</button>
+          <button class="btn red" data-action="whiteReject">Refuser</button>
         </div>
       </div>` : ''}
   `;
@@ -472,31 +534,28 @@ function whiteGuess() {
 function end() {
   const g = state.game;
   const w = g.winner;
-  const cls = w.includes('under') ? 'under' : w.includes('white') ? 'white' : 'civil';
-  const title = w.includes('civil') ? 'Les Civils gagnent !'
-    : w.length === 2 ? 'Undercover et Mr. White gagnent !'
-    : w.includes('under') ? 'L\'Undercover gagne !' : 'Mr. White gagne !';
-  const emoji = { civil: '🎉', under: '🕵️', white: '👻' }[cls];
+  const cls = w.includes('civil') ? 'civil' : w.includes('under') ? 'under' : 'white';
+  const stampText = w.includes('civil') ? 'Les civils'
+    : w.length === 2 ? 'Les imposteurs'
+    : w.includes('under') ? 'Undercover' : 'Mr. White';
   return `
-    <div class="banner ${cls}">
-      <div class="emoji">${emoji}</div>
-      <h1>${title}</h1>
+    ${verdict('Affaire classée · victoire', '', stampText, cls)}
+    <div class="words">
+      <div><span class="label c-civil">Mot des civils</span><span class="w">${esc(g.civilWord)}</span></div>
+      <div><span class="label c-under">Mot undercover</span><span class="w">${esc(g.underWord)}</span></div>
     </div>
-    <div class="card">
-      <div class="row between"><span class="role-civil">Mot civil</span><strong>${esc(g.civilWord)}</strong></div>
-      <div class="row between"><span class="role-under">Mot undercover</span><strong>${esc(g.underWord)}</strong></div>
-    </div>
-    <div class="list">
+    <div class="table">
       ${g.players.map((p) => `
-        <div class="item">
-          <span>${p.alive ? '' : '💀 '}${esc(p.name)}</span>
-          <span class="${roleClass(p.role)}">${ROLE_LABEL[p.role]}${w.includes(p.role) ? ` +${POINTS[p.role]}` : ''}</span>
+        <div class="tr">
+          <span class="strong ${p.alive ? '' : 'dead'}">${esc(p.name)}</span>
+          <span class="mini-stamp ${roleClass(p.role)}">${ROLE_LABEL[p.role]}</span>
+          <span class="pts" style="min-width:44px;text-align:right">${w.includes(p.role) ? `+${POINTS[p.role]}` : ''}</span>
         </div>`).join('')}
     </div>
-    <button class="primary" data-action="replay">Rejouer (mêmes joueurs)</button>
-    <div class="row">
-      <button class="grow" data-action="toHome">Menu</button>
-      <button class="grow" data-action="go" data-screen="scores">🏆 Scores</button>
+    <button class="btn" data-action="replay">Rejouer</button>
+    <div class="links">
+      <button class="link" data-action="toHome">Menu</button>
+      <button class="link" data-action="go" data-screen="scores">Scores</button>
     </div>
   `;
 }
@@ -505,25 +564,24 @@ function overlay() {
   if (!ui.overlay) return '';
   const g = state.game;
   if (ui.overlay.type === 'confirm') {
-    return `<div class="overlay"><div class="card center">
-      <h2>${esc(ui.overlay.text)}</h2>
-      <div class="row">
-        <button class="grow" data-action="closeOverlay">Annuler</button>
-        <button class="grow danger" data-action="confirmOverlay">Confirmer</button>
+    return `<div class="overlay"><div class="sheet" role="dialog" aria-modal="true">
+      <h3>${esc(ui.overlay.text)}</h3>
+      <div class="row2">
+        <button class="btn outline" data-action="closeOverlay">Annuler</button>
+        <button class="btn red" data-action="confirmOverlay">Confirmer</button>
       </div></div></div>`;
   }
   if (ui.overlay.type === 'peek') {
     if (ui.peek !== null) {
-      const p = g.players[ui.peek];
-      return `<div class="overlay"><div class="card" style="min-height:60vh">
-        <h2 class="center">${esc(p.name)}</h2>${wordCard(p)}
-        <button class="primary" data-action="closeOverlay">Cacher</button></div></div>`;
+      return `<div class="overlay"><div class="sheet" role="dialog" aria-modal="true" style="min-height:70vh">
+        ${wordCard(g.players[ui.peek], ui.peek)}
+        <button class="btn" data-action="closeOverlay">Fermer le dossier</button></div></div>`;
     }
-    return `<div class="overlay"><div class="card">
-      <h2>Qui veut revoir son mot ?</h2>
-      <div class="grid">${g.players.map((p, i) => p.alive
-        ? `<button class="tile" data-action="peek" data-i="${i}">${esc(p.name)}</button>` : '').join('')}</div>
-      <button class="ghost" data-action="closeOverlay">Annuler</button></div></div>`;
+    return `<div class="overlay"><div class="sheet" role="dialog" aria-modal="true">
+      <h3>Qui veut revoir son mot ?</h3>
+      <div class="files">${g.players.map((p, i) => p.alive
+        ? `<button class="file" data-action="peek" data-i="${i}"><span class="label">Agent ${pad(i + 1)}</span><span class="fname">${esc(p.name)}</span></button>` : '').join('')}</div>
+      <button class="link center" data-action="closeOverlay">Annuler</button></div></div>`;
   }
   return '';
 }
@@ -554,7 +612,7 @@ const actions = {
     if (p.pending) {
       state.pendingPairs = state.pendingPairs.filter((x) => x.id !== p.id);
     } else if (cloudStatus !== 'online') {
-      alert('Il faut être connecté pour supprimer une paire.');
+      toast('Il faut être connecté pour supprimer une paire.');
     } else {
       confirm(`Supprimer « ${p.a} / ${p.b} » pour tout le monde ?`, () => window.cloud.remove(p.id));
     }
@@ -581,16 +639,16 @@ const forms = {
   addPlayer: (f) => {
     const name = f.elements.name.value.trim();
     if (!name) return false;
-    if (state.players.some((p) => p.toLowerCase() === name.toLowerCase())) { alert('Ce nom est déjà pris.'); return false; }
+    if (state.players.some((p) => p.toLowerCase() === name.toLowerCase())) { toast('Ce nom est déjà pris.'); return false; }
     state.players.push(name);
   },
   addPair: (f) => {
     const a = f.elements.a.value.trim(), b = f.elements.b.value.trim();
     let cat = f.elements.cat.value === NEW_CAT ? f.elements.newCat.value.trim() : f.elements.cat.value;
     if (!a || !b) return false;
-    if (!cat) { alert('Choisis ou crée une catégorie.'); return false; }
-    if (normalize(a) === normalize(b)) { alert('Les deux mots doivent être différents.'); return false; }
-    if (pairExists(a, b)) { alert('Cette paire existe déjà.'); return false; }
+    if (!cat) { toast('Choisis ou crée une catégorie.'); return false; }
+    if (normalize(a) === normalize(b)) { toast('Les deux mots doivent être différents.'); return false; }
+    if (pairExists(a, b)) { toast('Cette paire existe déjà.'); return false; }
     // Réutilise une catégorie existante écrite différemment (accents, majuscules).
     cat = Object.keys(allCategories()).find((c) => normalize(c) === normalize(cat)) || cat;
     const pair = { id: newId(), a, b, cat };

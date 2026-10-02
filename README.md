@@ -27,7 +27,7 @@ Déjà configurée (projet `undercover-12e56`). Pour repartir de zéro sur un au
 3. **Authentication** → onglet *Paramètres* → **Domaines autorisés** → Ajouter `aaqui-nas.github.io`.
 4. **Firestore Database** → Créer une base de données → emplacement en Europe (ex. `eur3`) → **mode production**.
 5. Firestore → onglet **Règles** → remplace tout par le contenu de `firestore.rules` → **Publier**.
-6. ⚙️ **Paramètres du projet** → *Vos applications* → icône **Web `</>`** → donne un nom → Enregistrer.
+6. **Paramètres du projet** (roue dentée) → *Vos applications* → icône **Web `</>`** → donne un nom → Enregistrer.
    Copie l'objet `firebaseConfig` affiché et colle-le dans `firebase-config.js` à la place de `null` :
    `window.FIREBASE_CONFIG = { apiKey: "...", authDomain: "...", ... };`
 7. `git add . && git commit -m "Firebase" && git push` → déployé automatiquement.
@@ -35,7 +35,7 @@ Déjà configurée (projet `undercover-12e56`). Pour repartir de zéro sur un au
 Fonctionnement :
 - Au lancement avec internet, l'appli télécharge toute la liste et la garde sur le téléphone ; sans internet elle joue
   avec la dernière liste téléchargée. Il faut donc internet au moins une fois, au tout premier lancement.
-- « ✏️ Ajouter une paire » : deux mots + une catégorie (existante ou nouvelle). Hors-ligne, la paire est mise en attente,
+- « Ajouter une paire » : deux mots + une catégorie (existante ou nouvelle). Hors-ligne, la paire est mise en attente,
   jouable tout de suite, et envoyée automatiquement au prochain lancement avec internet.
 - Chacun ne peut supprimer que ses propres ajouts. Les paires se gèrent aussi dans la console Firebase
   (Firestore → collection `pairs` ; champs `a`, `b`, `cat`).

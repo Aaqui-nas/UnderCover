@@ -1,5 +1,6 @@
 const CACHE = 'undercover-dev'; // remplacé automatiquement par la CI à chaque déploiement
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'firebase-config.js', 'cloud.js', 'manifest.json',
+  'fonts/stencil-800.woff2', 'fonts/plexmono-400.woff2', 'fonts/plexmono-600.woff2',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {

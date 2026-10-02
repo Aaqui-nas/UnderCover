@@ -50,7 +50,7 @@ async function start() {
     remove(id) {
       return fs.deleteDoc(fs.doc(db, 'pairs', id)).catch((err) => {
         console.error(err);
-        alert('Suppression impossible.');
+        window.toast?.('Suppression impossible.');
       });
     },
   };
