@@ -1,6 +1,8 @@
 const STORAGE_KEY = 'undercover-v1';
 const PAIRS_KEY = 'undercover-pairs';
-const PHOTOS_KEY = 'undercover-photos';
+const PHOTOS_KEY = 'undercover-photos'; // ancienne version : photos gardées sur le téléphone
+const AGENTS_KEY = 'undercover-agents';
+const STAT_FIELDS = ['points', 'games', 'wins', 'civilG', 'civilW', 'underG', 'underW', 'whiteG', 'whiteW', 'firstOut', 'survived', 'guessed'];
 const BANNED_SCORE = -3; // note nette à partir de laquelle une paire n'est plus tirée
 const POINTS = { civil: 2, under: 10, white: 6 };
 const ROLE_LABEL = { civil: 'Civil', under: 'Undercover', white: 'Mr. White' };
@@ -17,8 +19,7 @@ state = {
   white: 0,
   disabledCats: [],
   pendingPairs: [], // ajoutées hors-ligne, envoyées dès que la connexion revient
-  scores: {},
-  stats: {}, // par joueur : parties, victoires par rôle…
+  agentOps: [], // modifications d'agents faites hors-ligne, envoyées au retour du réseau
   rated: {}, // paires déjà notées sur ce téléphone : id → +1 / -1
   pendingRatings: [], // notes données hors-ligne
   usedPairs: [],
@@ -37,11 +38,93 @@ if (state.customPairs) {
 delete state.categories;
 let ui = { overlay: null, peek: null, search: '', addOpen: false, profile: null, trash: null };
 
-// Photos des joueurs : à part, pour ne pas réécrire des images à chaque sauvegarde.
-let photos = {};
-try { photos = JSON.parse(localStorage.getItem(PHOTOS_KEY)) || {}; } catch {}
-function savePhotos() {
-  try { localStorage.setItem(PHOTOS_KEY, JSON.stringify(photos)); return true; } catch { return false; }
+// Agents (joueurs) : nom, photo, points et stats sont dans la base, partagés entre
+// téléphones. Copie locale pour jouer sans réseau.
+let agentsCache = { agents: [], syncedAt: 0 };
+try { agentsCache = JSON.parse(localStorage.getItem(AGENTS_KEY)) || agentsCache; } catch {}
+let agentsLoaded = false; // liste reçue du serveur pendant cette session
+
+window.onAgents = (agents) => {
+  agentsCache = { agents, syncedAt: Date.now() };
+  agentsLoaded = true;
+  try { localStorage.setItem(AGENTS_KEY, JSON.stringify(agentsCache)); } catch {}
+  migrateLocalAgents();
+  if (['home', 'agents', 'profile'].includes(state.screen)) render(); else save();
+};
+
+// Vue des agents = base + modifications encore en attente sur ce téléphone.
+function allAgents() {
+  const map = new Map(agentsCache.agents.map((a) => [a.id, { ...a }]));
+  for (const op of state.agentOps) {
+    if (op.type === 'delete') map.delete(op.id);
+    else if (op.type === 'set') map.set(op.id, { ...(map.get(op.id) || { id: op.id }), ...op.data });
+    else if (op.type === 'inc' && map.has(op.id)) {
+      const a = map.get(op.id);
+      for (const [k, v] of Object.entries(op.data)) a[k] = (a[k] || 0) + v;
+    }
+  }
+  return [...map.values()].filter((a) => a.name);
+}
+const nameKey = (name) => normalize(name.trim());
+const agentByName = (name) => allAgents().find((a) => nameKey(a.name) === nameKey(name));
+const agentById = (id) => allAgents().find((a) => a.id === id);
+
+function agentOp(op) {
+  if (cloudStatus === 'online' && window.cloud) runAgentOp(op);
+  else state.agentOps.push(op);
+}
+
+function runAgentOp(op) {
+  const c = window.cloud;
+  const write = op.type === 'set' ? c.agentSet(op.id, op.data)
+    : op.type === 'inc' ? c.agentInc(op.id, op.data)
+    : c.agentDelete(op.id);
+  write.catch((err) => {
+    console.error(err);
+    toast('Modification d\'un agent refusée par le serveur.');
+  });
+}
+
+function flushAgentOps() {
+  const queue = state.agentOps;
+  state.agentOps = [];
+  queue.forEach(runAgentOp);
+}
+
+// Retrouve l'agent de ce nom, ou le crée.
+function ensureAgent(name) {
+  const existing = agentByName(name);
+  if (existing) return existing;
+  const id = newId();
+  agentOp({ type: 'set', id, data: { name: name.trim().slice(0, 20), createdAt: true } });
+  return { id, name };
+}
+
+// Ancienne version : points, stats et photos étaient sur le téléphone → on les verse dans la base.
+function migrateLocalAgents() {
+  if (state.agentsMigrated || !agentsLoaded || cloudStatus !== 'online') return;
+  state.agentsMigrated = true;
+  let oldPhotos = {};
+  try { oldPhotos = JSON.parse(localStorage.getItem(PHOTOS_KEY)) || {}; } catch {}
+  const scores = state.scores || {}, stats = state.stats || {};
+  const names = new Set([...state.players, ...Object.keys(scores), ...Object.keys(stats), ...Object.keys(oldPhotos)]);
+  for (const name of names) {
+    const a = ensureAgent(name);
+    const st = stats[name];
+    const delta = { points: scores[name] || 0 };
+    if (st) {
+      Object.assign(delta, {
+        games: st.games, wins: st.wins, civilG: st.civil[0], civilW: st.civil[1], underG: st.under[0], underW: st.under[1],
+        whiteG: st.white[0], whiteW: st.white[1], firstOut: st.firstOut, survived: st.survived, guessed: st.guessed,
+      });
+    }
+    if (Object.values(delta).some(Boolean)) agentOp({ type: 'inc', id: a.id, data: delta });
+    if (oldPhotos[name] && !a.photo) agentOp({ type: 'set', id: a.id, data: { photo: oldPhotos[name] } });
+  }
+  delete state.scores;
+  delete state.stats;
+  try { localStorage.removeItem(PHOTOS_KEY); } catch {}
+  save();
 }
 
 // Toutes les paires viennent de la base Firestore (cloud.js). La dernière liste
@@ -61,7 +144,7 @@ window.onPairs = (pairs) => {
 window.onCloudStatus = (status) => {
   cloudStatus = status;
   if (window.cloud) state.uid = window.cloud.uid;
-  if (status === 'online') { flushPending(); flushRatings(); }
+  if (status === 'online') { flushPending(); flushRatings(); flushAgentOps(); migrateLocalAgents(); }
   if (['home', 'pairs'].includes(state.screen)) render();
 };
 
@@ -233,23 +316,23 @@ function checkWinner() {
   return null;
 }
 
-function emptyStats() {
-  return { games: 0, wins: 0, civil: [0, 0], under: [0, 0], white: [0, 0], firstOut: 0, survived: 0, guessed: 0 };
-}
+const statsOf = (a) => Object.fromEntries(STAT_FIELDS.map((f) => [f, a?.[f] || 0]));
 
 function endGame(winnerRoles) {
   const g = state.game;
   g.winner = winnerRoles;
   for (const p of g.players) {
     const won = winnerRoles.includes(p.role);
-    if (won) state.scores[p.name] = (state.scores[p.name] || 0) + POINTS[p.role];
-    const st = (state.stats[p.name] ||= emptyStats());
-    st.games++;
-    st[p.role][0]++;
-    if (won) { st.wins++; st[p.role][1]++; }
-    if (p.alive) st.survived++;
-    if (g.elimOrder[0] === p.name) st.firstOut++;
-    if (p.role === 'white' && g.whiteGuessed && g.eliminated === p.name) st.guessed++;
+    agentOp({ type: 'inc', id: ensureAgent(p.name).id, data: {
+      games: 1,
+      wins: won ? 1 : 0,
+      points: won ? POINTS[p.role] : 0,
+      [`${p.role}G`]: 1,
+      [`${p.role}W`]: won ? 1 : 0,
+      survived: p.alive ? 1 : 0,
+      firstOut: g.elimOrder[0] === p.name ? 1 : 0,
+      guessed: p.role === 'white' && g.whiteGuessed && g.eliminated === p.name ? 1 : 0,
+    } });
   }
   state.screen = 'end';
 }
@@ -372,7 +455,7 @@ function initials(name) {
 }
 
 function avatar(name, cls = '') {
-  const src = photos[name];
+  const src = agentByName(name)?.photo;
   return src
     ? `<img class="ava ${cls}" src="${src}" alt="">`
     : `<span class="ava initials ${cls}" aria-hidden="true">${esc(initials(name))}</span>`;
@@ -428,6 +511,9 @@ function home() {
   else if (!pairsCache.pairs.length && !state.pendingPairs.length) warning = 'Aucun mot sur ce téléphone. Lance l\'appli une première fois avec internet pour les télécharger.';
   else if (!poolSize) warning = 'Coche au moins une catégorie.';
   const statusCls = cloudStatus === 'online' ? 'online' : pairsCache.syncedAt && cloudStatus !== 'connecting' ? 'offline' : '';
+  const inGame = new Set(state.players.map(nameKey));
+  const known = allAgents().filter((a) => !inGame.has(nameKey(a.name)))
+    .sort((x, y) => (y.games || 0) - (x.games || 0) || collator.compare(x.name, y.name));
 
   return `
     <header class="masthead">
@@ -448,6 +534,11 @@ function home() {
         <input type="text" name="name" placeholder="Nom de l'agent" maxlength="20" autocomplete="off" enterkeyhint="done">
         <button class="icon-btn solid" type="submit" aria-label="Ajouter l'agent">${icon('plus')}</button>
       </form>
+      ${known.length ? `<div class="known">
+        <span class="label">Déjà venus</span>
+        <div class="known-list">${known.map((a) => `
+          <button class="known-agent" data-action="addKnown" data-name="${esc(a.name)}">${avatar(a.name, 'xs')}<span>${esc(a.name)}</span></button>`).join('')}
+        </div></div>` : ''}
       ${n ? `<ol class="roster">
         ${state.players.map((p, i) => `
           <li>
@@ -632,61 +723,56 @@ function loadTrash() {
     .finally(() => { if (state.screen === 'trash') render(); });
 }
 
-function agentNames() {
-  return [...new Set([...state.players, ...Object.keys(state.scores), ...Object.keys(state.stats)])];
-}
-
 function agents() {
-  const rows = agentNames()
-    .map((name) => ({ name, pts: state.scores[name] || 0, st: state.stats[name] || emptyStats() }))
-    .sort((x, y) => y.pts - x.pts || y.st.wins - x.st.wins || collator.compare(x.name, y.name));
+  const rows = allAgents().sort((x, y) => (y.points || 0) - (x.points || 0) || (y.wins || 0) - (x.wins || 0) || collator.compare(x.name, y.name));
   return `
     ${backLink()}
     <div class="screen-head"><h2 class="display">Agents</h2></div>
-    <p class="muted">Victoire : civil ${POINTS.civil} pts · Mr. White ${POINTS.white} pts · Undercover ${POINTS.under} pts. Touche un agent pour voir sa fiche.</p>
+    <p class="muted">Partagés entre tous les téléphones. Victoire : civil ${POINTS.civil} pts · Mr. White ${POINTS.white} pts · Undercover ${POINTS.under} pts.</p>
     ${rows.length ? `<div class="table">
-      ${rows.map(({ name, pts, st }, i) => `
-        <button class="tr agent-row" data-action="openProfile" data-name="${esc(name)}">
+      ${rows.map((a, i) => `
+        <button class="tr agent-row" data-action="openProfile" data-id="${esc(a.id)}">
           <span class="rank">${pad(i + 1)}</span>
-          ${avatar(name, 'sm')}
-          <span class="fill"><span class="strong">${esc(name)}</span>
-            <span class="sub">${st.wins} victoire${st.wins > 1 ? 's' : ''} · ${st.games} partie${st.games > 1 ? 's' : ''}</span></span>
-          <span class="pts">${pts}</span>
+          ${avatar(a.name, 'sm')}
+          <span class="fill"><span class="strong">${esc(a.name)}</span>
+            <span class="sub">${a.wins || 0} victoire${a.wins > 1 ? 's' : ''} · ${a.games || 0} partie${a.games > 1 ? 's' : ''}</span></span>
+          <span class="pts">${a.points || 0}</span>
         </button>`).join('')}
     </div>
-    <button class="link red" data-action="resetScores">Remettre les points à zéro</button>`
+    <button class="link red" data-action="resetPoints">Remettre les points de tous à zéro</button>`
     : '<p class="empty">Aucun agent pour l\'instant. Ajoute des joueurs sur l\'accueil.</p>'}
   `;
 }
 
 function profile() {
-  const name = ui.profile;
-  if (!name) return agents();
-  const st = state.stats[name] || emptyStats();
-  const pts = state.scores[name] || 0;
+  const a = agentById(ui.profile);
+  if (!a) return agents();
+  const st = statsOf(a);
   const role = (key, label) => `
     <div class="tr">
       <span class="strong fill ${roleClass(key)}">${label}</span>
-      <span class="sub">${st[key][1]} / ${st[key][0]} gagnée${st[key][1] > 1 ? 's' : ''}</span>
-      <span class="pts small">${percent(st[key][1], st[key][0])}</span>
+      <span class="sub">${st[`${key}W`]} / ${st[`${key}G`]} gagnée${st[`${key}W`] > 1 ? 's' : ''}</span>
+      <span class="pts small">${percent(st[`${key}W`], st[`${key}G`])}</span>
     </div>`;
   return `
     ${backLink('agents', 'Agents')}
     <div class="id-card">
-      <div class="id-photo">${avatar(name, 'xl')}</div>
+      <div class="id-photo">${avatar(a.name, 'xl')}</div>
       <div class="id-info">
         <span class="label">Fiche agent</span>
-        <h2 class="display">${esc(name)}</h2>
-        <label class="link photo-btn">${photos[name] ? 'Changer la photo' : 'Ajouter une photo'}
-          <input type="file" accept="image/*" data-photo="${esc(name)}" hidden></label>
-        ${photos[name] ? `<button class="link red" data-action="removePhoto" data-name="${esc(name)}">Retirer la photo</button>` : ''}
+        <h2 class="display">${esc(a.name)}</h2>
+        <label class="link photo-btn">Prendre une photo
+          <input type="file" accept="image/*" capture="user" data-photo="${esc(a.id)}" hidden></label>
+        <label class="link photo-btn">Choisir dans la galerie
+          <input type="file" accept="image/*" data-photo="${esc(a.id)}" hidden></label>
+        ${a.photo ? `<button class="link red" data-action="removePhoto" data-id="${esc(a.id)}">Retirer la photo</button>` : ''}
       </div>
     </div>
     <div class="stat-grid">
       <div><span class="big">${st.games}</span><span class="label">Parties</span></div>
       <div><span class="big">${st.wins}</span><span class="label">Victoires</span></div>
       <div><span class="big">${percent(st.wins, st.games)}</span><span class="label">Réussite</span></div>
-      <div><span class="big">${pts}</span><span class="label">Points</span></div>
+      <div><span class="big">${st.points}</span><span class="label">Points</span></div>
     </div>
     <section class="section">
       <div class="section-head"><span class="label">Par rôle</span></div>
@@ -700,12 +786,15 @@ function profile() {
         <div class="tr"><span class="fill">Mot deviné en Mr. White</span><span class="pts small">${st.guessed}</span></div>
       </div>
     </section>
-    ${st.games ? `<button class="link red" data-action="resetStats" data-name="${esc(name)}">Effacer les stats de ${esc(name)}</button>` : ''}
+    <div class="links">
+      ${st.games || st.points ? `<button class="link red" data-action="resetStats" data-id="${esc(a.id)}">Effacer ses stats</button>` : '<span></span>'}
+      <button class="link red" data-action="deleteAgent" data-id="${esc(a.id)}">Supprimer l'agent</button>
+    </div>
   `;
 }
 
 // Photo : recadrée en carré et réduite pour tenir dans le stockage du téléphone.
-function setPhoto(name, file) {
+function setPhoto(id, file) {
   const url = URL.createObjectURL(file);
   const img = new Image();
   img.onload = () => {
@@ -714,12 +803,7 @@ function setPhoto(name, file) {
     canvas.width = canvas.height = size;
     canvas.getContext('2d').drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
     URL.revokeObjectURL(url);
-    const previous = photos[name];
-    photos[name] = canvas.toDataURL('image/jpeg', 0.8);
-    if (!savePhotos()) {
-      if (previous) photos[name] = previous; else delete photos[name];
-      toast('Plus de place pour les photos sur ce téléphone.');
-    }
+    agentOp({ type: 'set', id, data: { photo: canvas.toDataURL('image/jpeg', 0.8) } });
     render();
   };
   img.onerror = () => { URL.revokeObjectURL(url); toast('Impossible de lire cette image.'); };
@@ -983,10 +1067,23 @@ const actions = {
       confirm(`Supprimer « ${p.a} / ${p.b} » pour tout le monde ?`, () => window.cloud.remove(p));
     }
   },
-  resetScores: () => confirm('Remettre les points de tout le monde à zéro ?', () => { state.scores = {}; }),
-  openProfile: (d) => { ui.profile = d.name; state.screen = 'profile'; },
-  removePhoto: (d) => { delete photos[d.name]; savePhotos(); },
-  resetStats: (d) => confirm(`Effacer les stats et les points de ${d.name} ?`, () => { delete state.stats[d.name]; delete state.scores[d.name]; }),
+  resetPoints: () => confirm('Remettre les points de tous les agents à zéro, pour tout le monde ?', () => {
+    for (const a of allAgents()) if (a.points) agentOp({ type: 'set', id: a.id, data: { points: 0 } });
+  }),
+  openProfile: (d) => { ui.profile = d.id || ensureAgent(d.name).id; state.screen = 'profile'; },
+  addKnown: (d) => { if (!state.players.some((p) => nameKey(p) === nameKey(d.name))) state.players.push(d.name); },
+  removePhoto: (d) => agentOp({ type: 'set', id: d.id, data: { photo: null } }),
+  resetStats: (d) => confirm(`Effacer les stats et les points de ${agentById(d.id)?.name} pour tout le monde ?`, () => {
+    agentOp({ type: 'set', id: d.id, data: Object.fromEntries(STAT_FIELDS.map((f) => [f, 0])) });
+  }),
+  deleteAgent: (d) => {
+    const a = agentById(d.id);
+    confirm(`Supprimer ${a?.name} et ses stats pour tout le monde ?`, () => {
+      agentOp({ type: 'delete', id: d.id });
+      state.players = state.players.filter((p) => nameKey(p) !== nameKey(a.name));
+      state.screen = 'agents';
+    });
+  },
   rate: (d) => ratePair(state.game.pairId, +d.v),
   openTrash: () => { state.screen = 'trash'; loadTrash(); },
   restore: (d) => {
@@ -1034,8 +1131,9 @@ const forms = {
   addPlayer: (f) => {
     const name = f.elements.name.value.trim();
     if (!name) return false;
-    if (state.players.some((p) => p.toLowerCase() === name.toLowerCase())) { toast('Ce nom est déjà pris.'); return false; }
-    state.players.push(name);
+    if (state.players.some((p) => nameKey(p) === nameKey(name))) { toast('Cet agent est déjà dans la partie.'); return false; }
+    // Un agent existant garde son orthographe ; sinon on le crée dans la base.
+    state.players.push(ensureAgent(name).name);
   },
   addPair: (f) => {
     const a = f.elements.a.value.trim(), b = f.elements.b.value.trim();

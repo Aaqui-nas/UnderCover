@@ -44,8 +44,11 @@ Fonctionnement :
 - Les paires se gèrent aussi dans la console Firebase (Firestore → collections `pairs` et `trash`).
 
 ## Agents
-« Agents » sur l'accueil : classement aux points, et une fiche par joueur (photo, parties, victoires par rôle,
-éliminé en premier, etc.). Photos et stats sont gardées sur le téléphone qui sert à jouer.
+Les joueurs sont des agents partagés dans la base (collection `agents`) : nom, photo, points et stats, les mêmes sur
+tous les téléphones. Sur l'accueil, « Déjà venus » permet d'ajouter un agent connu d'un toucher.
+« Agents » : classement aux points et fiche par joueur (photo prise avec l'appareil ou choisie dans la galerie,
+parties, victoires par rôle, éliminé en premier, etc.). Une partie jouée hors-ligne met les stats à jour au retour
+du réseau.
 
 ## Inviter
 « Inviter » affiche un QR code du lien de l'appli, avec boutons Copier et Partager.

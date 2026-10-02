@@ -37,6 +37,27 @@ service cloud.firestore {
       allow delete: if request.auth != null;
     }
 
+    // Agents : nom, photo (JPEG réduit en base64), points et stats, partagés entre téléphones.
+    function count(d, f) {
+      return d.get(f, 0) is int && d.get(f, 0) >= 0;
+    }
+    function validAgent(d) {
+      return d.keys().hasOnly(['name', 'photo', 'createdAt', 'points', 'games', 'wins',
+          'civilG', 'civilW', 'underG', 'underW', 'whiteG', 'whiteW', 'firstOut', 'survived', 'guessed'])
+        && d.name is string && d.name.size() > 0 && d.name.size() <= 20
+        && (d.get('photo', null) == null || (d.photo is string && d.photo.size() < 200000))
+        && count(d, 'points') && count(d, 'games') && count(d, 'wins')
+        && count(d, 'civilG') && count(d, 'civilW') && count(d, 'underG') && count(d, 'underW')
+        && count(d, 'whiteG') && count(d, 'whiteW')
+        && count(d, 'firstOut') && count(d, 'survived') && count(d, 'guessed');
+    }
+
+    match /agents/{agentId} {
+      allow read: if true;
+      allow create, update: if request.auth != null && validAgent(request.resource.data);
+      allow delete: if request.auth != null;
+    }
+
     // Corbeille : historique des paires supprimées, restaurables.
     match /trash/{trashId} {
       allow read: if true;

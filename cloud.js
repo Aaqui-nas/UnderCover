@@ -1,7 +1,7 @@
 // Synchronisation des paires de mots avec Firestore.
-// Expose window.cloud = { uid, add, remove, rate, listTrash, restore } et prévient app.js via
-// window.onPairs(pairs) (liste complète confirmée par le serveur) et
-// window.onCloudStatus(status).
+// Expose window.cloud (paires, notes, corbeille, agents) et prévient app.js via
+// window.onPairs(pairs), window.onAgents(agents) (listes complètes venant du
+// serveur) et window.onCloudStatus(status).
 const SDK = 'https://www.gstatic.com/firebasejs/10.12.2';
 const MAX_LEN = 40;
 const MAX_CAT_LEN = 30;
@@ -71,6 +71,20 @@ async function start() {
         return { id: d.id, a, b, cat, up, down, pairId, deletedAt: deletedAt?.toMillis?.() || 0 };
       });
     },
+    // Agents : écritures fusionnées, donc rejouables sans risque.
+    agentSet(id, fields) {
+      const data = { ...fields };
+      if (data.createdAt === true) data.createdAt = fs.serverTimestamp();
+      return fs.setDoc(fs.doc(db, 'agents', id), data, { merge: true });
+    },
+    // Compteurs : incréments atomiques, justes même si deux téléphones jouent en même temps.
+    agentInc(id, delta) {
+      const data = Object.fromEntries(Object.entries(delta).filter(([, v]) => v).map(([k, v]) => [k, fs.increment(v)]));
+      return fs.setDoc(fs.doc(db, 'agents', id), data, { merge: true });
+    },
+    agentDelete(id) {
+      return fs.deleteDoc(fs.doc(db, 'agents', id));
+    },
     restore(t) {
       const batch = fs.writeBatch(db);
       batch.set(fs.doc(db, 'pairs', t.pairId), {
@@ -97,6 +111,14 @@ async function start() {
     console.error(err);
     setStatus('error');
   });
+
+  fs.onSnapshot(fs.collection(db, 'agents'), (snap) => {
+    if (snap.metadata.fromCache) return;
+    window.onAgents?.(snap.docs.map((d) => {
+      const { createdAt, ...data } = d.data({ serverTimestamps: 'estimate' });
+      return { id: d.id, ...data };
+    }));
+  }, (err) => console.error(err));
 
   window.addEventListener('offline', () => setStatus('offline'));
 }
